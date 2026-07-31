@@ -1,0 +1,63 @@
+# Paramètres techniques, indépendants du domaine.
+
+decoupage:
+  strategie: recursive
+  taille_chunk: 1000
+  recouvrement: 150
+  separateurs: ["\n\n", "\n", ". ", " ", ""]
+
+ingestion:
+  extensions_supportees:
+    [".pdf", ".docx", ".txt", ".md", ".xlsx", ".csv", ".pptx", ".html"]
+  taille_max_mo: 50
+  inferer_metadonnees: true
+  algo_hash: sha256
+  chars_pour_inference: 3000 # extrait envoyé au LLM par document
+  seuil_texte_vide: 100 # < N caractères => suspicion de scan
+
+ocr:
+  active: true
+  langues: "fra+ara+eng"
+  dpi: 300
+  pages_max: 20 # garde-fou sur les gros PDF scannés
+
+normalisation:
+  minuscules: true
+  retirer_accents: true
+  reduire_espaces: true
+  formats_date_essayes:
+    - "%d/%m/%Y"
+    - "%d-%m-%Y"
+    - "%Y-%m-%d"
+    - "%d %B %Y"
+    - "%d.%m.%Y"
+  locale_date: fr
+
+resolution_entites:
+  active: true
+  seuil_levenshtein: 0.88 # rapidfuzz ratio normalisé
+  seuil_embedding: 0.92 # cosinus
+  utiliser_embedding: true
+  longueur_min_valeur: 3 # sous ce seuil, pas de fusion
+
+recherche:
+  top_k_dense: 20
+  top_k_sparse: 20
+  top_k_final: 6
+  fusion: rrf # rrf | alpha
+  rrf_k: 60
+  hybrid_alpha: 0.5 # utilisé si fusion = alpha
+  score_min: 0.30
+
+qdrant:
+  nom_collection: documents
+  distance: cosine
+  taille_vecteur_dense: 1024 # BGE-M3
+  sparse_active: true
+  taille_lot_upsert: 64
+
+agent:
+  max_iterations: 6
+  timeout_secondes: 120
+  citations_obligatoires: true
+  refuser_sans_source: true

@@ -1,0 +1,32 @@
+# Environnement
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Secrets
+.env
+
+# Données et index
+data/documents/*
+data/vectordb/
+data/logs/
+!data/documents/.gitkeep
+
+# Wheels et gros binaires
+*.whl
+*.zip
+
+# Caches de modèles
+.cache/
+models/
+
+# Profils générés
+config/schemas/*_brouillon.yaml
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

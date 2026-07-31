@@ -1,0 +1,97 @@
+profile_name: generic
+description: >
+  Profil par défaut, sans hypothèse de domaine.
+
+# --- Langue ---
+langue:
+  langue_sortie: fr # langue des réponses, résumés et libellés
+  conserver_langue_source: false # true = répondre dans la langue du document
+
+# --- Taxonomie de classification ---
+classification:
+  active: true
+  multi_etiquette: false
+  categories:
+    - nom: contrat
+      description: Contrats, accords, conditions générales, engagements signés.
+    - nom: facture
+      description: Factures, devis, bons de commande, documents comptables.
+    - nom: rapport
+      description: Rapports, analyses, comptes rendus, synthèses.
+    - nom: correspondance
+      description: Emails, lettres, notes internes, échanges.
+    - nom: identite
+      description: Pièces d'identité, passeports, certificats, attestations.
+    - nom: technique
+      description: Documentation technique, spécifications, manuels, procédures.
+    - nom: autre
+      description: Tout document ne correspondant à aucune autre catégorie.
+  categorie_defaut: autre
+  seuil_confiance: 0.55
+
+# --- Métadonnées inférées, filtrables à la recherche ---
+champs_metadonnees:
+  - nom: date_document
+    type: date
+    description: Date principale du document (émission, signature, publication).
+    filtrable: true
+    obligatoire: false
+  - nom: organisations
+    type: liste[texte]
+    description: Organisations, entreprises ou institutions mentionnées.
+    filtrable: true
+    obligatoire: false
+  - nom: personnes
+    type: liste[texte]
+    description: Noms de personnes identifiées dans le document.
+    filtrable: true
+    obligatoire: false
+  - nom: reference
+    type: texte
+    description: Numéro de référence, identifiant ou code du document.
+    filtrable: true
+    obligatoire: false
+  - nom: langue_document
+    type: texte
+    description: Code langue ISO 639-1 du contenu (fr, en, ar...).
+    filtrable: true
+    obligatoire: true
+
+# --- Schéma d'extraction structurée (outil extract) ---
+schema_extraction:
+  nom: ExtractionGenerique
+  description: Entités génériques extraites d'un document.
+  champs:
+    - nom: titre
+      type: texte
+      description: Titre ou objet du document.
+      obligatoire: false
+    - nom: dates
+      type: liste[date]
+      description: Toutes les dates significatives mentionnées.
+      obligatoire: false
+    - nom: montants
+      type: liste[nombre]
+      description: Montants monétaires ou valeurs numériques clés.
+      obligatoire: false
+    - nom: devise
+      type: texte
+      description: Devise associée aux montants (code ISO 4217).
+      obligatoire: false
+    - nom: parties
+      type: liste[texte]
+      description: Parties prenantes, signataires ou entités concernées.
+      obligatoire: false
+    - nom: lieux
+      type: liste[texte]
+      description: Lieux, adresses ou zones géographiques mentionnés.
+      obligatoire: false
+    - nom: termes_cles
+      type: liste[texte]
+      description: Termes, obligations ou engagements clés du document.
+      obligatoire: false
+
+# --- Résumé ---
+resume:
+  style_defaut: puces # puces | paragraphe | synthese
+  nb_points_max: 7

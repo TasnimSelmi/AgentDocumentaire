@@ -1,0 +1,50 @@
+# --- Core LLM / Agent ---
+langchain==0.3.14
+langchain-core==0.3.29
+langchain-community==0.3.14
+langgraph==0.2.62
+langchain-openai==0.2.14
+
+# --- Vector store ---
+qdrant-client==1.12.2
+
+# --- Embeddings / reranking ---
+FlagEmbedding==1.3.3
+sentence-transformers==3.3.1
+torch==2.5.1
+
+# --- Chargement de documents ---
+pypdf==5.1.0
+pdfplumber==0.11.4
+python-docx==1.1.2
+openpyxl==3.1.5
+python-pptx==1.0.2
+markdownify==0.14.1
+beautifulsoup4==4.12.3
+
+# --- OCR ---
+pytesseract==0.3.13
+pdf2image==1.17.0
+Pillow==11.0.0
+
+# --- Normalisation / résolution d'entités ---
+rapidfuzz==3.10.1
+python-dateutil==2.9.0.post0
+Unidecode==1.3.8
+
+# --- Données / validation ---
+pydantic==2.10.4
+pydantic-settings==2.7.0
+PyYAML==6.0.2
+python-dotenv==1.0.1
+
+# --- UI ---
+streamlit==1.41.1
+
+# --- Éval / tests ---
+pytest==8.3.4
+pandas==2.2.3
+
+# --- Observabilité ---
+structlog==24.4.0
+tqdm==4.67.1
