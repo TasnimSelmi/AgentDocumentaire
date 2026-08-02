@@ -36,6 +36,7 @@ from src.config import (
     get_profil,
     get_settings,
 )
+from src.llm.factory import construire_llm
 from src.rag.embeddings import encoder, encoder_dense_seul, precharger_modeles
 from src.rag.loaders import ErreurChargement, Page, charger_document
 from src.rag.normalization import (
@@ -296,44 +297,6 @@ def decouper(pages: list[Page]) -> list[Chunk]:
 # ===========================================================================
 # 3. Inférence LLM (catégorie + métadonnées)
 # ===========================================================================
-
-def _construire_llm():
-    """
-    Instancie le client LLM selon .env.
-
-    Provisoirement ici ; sera déplacé dans un module partagé à l'Étape 2,
-    quand les outils auront besoin du même client.
-    """
-    s = get_settings()
-
-    if s.llm_provider == "openai":
-        from langchain_openai import ChatOpenAI
-
-        return ChatOpenAI(
-            model=s.llm_model,
-            api_key=s.llm_api_key,
-            base_url=s.llm_base_url or None,
-            temperature=s.llm_temperature,
-            max_tokens=s.llm_max_tokens,
-        )
-
-    if s.llm_provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-
-        return ChatAnthropic(
-            model=s.llm_model,
-            api_key=s.llm_api_key,
-            temperature=s.llm_temperature,
-            max_tokens=s.llm_max_tokens,
-        )
-
-    from langchain_community.chat_models import ChatOllama
-
-    return ChatOllama(
-        model=s.llm_model,
-        base_url=s.llm_base_url or "http://localhost:11434",
-        temperature=s.llm_temperature,
-    )
 
 
 def _modele_analyse(profil: Profil) -> type[BaseModel]:
@@ -637,7 +600,7 @@ def ingerer(
         registre_fichiers.vider()
 
     registre_entites = creer_registre(fonction_embedding=encoder_dense_seul)
-    llm = _construire_llm() if inferer else None
+    llm = construire_llm() if inferer else None
 
     # Découverte complète avant d'appliquer --limit. Le nettoyage des fichiers
     # supprimés doit toujours comparer le registre au corpus complet, sinon

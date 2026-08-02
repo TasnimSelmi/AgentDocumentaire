@@ -3,7 +3,7 @@ langchain==0.3.14
 langchain-core==0.3.29
 langchain-community==0.3.14
 langgraph==0.2.62
-langchain-openai==0.2.14
+langchain-ollama
 
 # --- Vector store ---
 qdrant-client==1.12.2

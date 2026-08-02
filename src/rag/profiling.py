@@ -39,7 +39,7 @@ from src.config import (
     get_config_technique,
     get_settings,
 )
-from src.rag.ingestion import _construire_llm
+from src.rag.ingestion import construire_llm
 from src.rag.loaders import ErreurChargement, charger_document
 
 logger = logging.getLogger(__name__)
@@ -752,7 +752,7 @@ def profiler(
         nb_lots_prepares,
     )
 
-    llm = _construire_llm()
+    llm = construire_llm()
 
     try:
         llm = llm.bind(max_tokens=4096)
