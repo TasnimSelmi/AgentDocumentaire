@@ -417,7 +417,7 @@ def rechercher_passages(
     top_k: int | None = None,
     limite_candidats: int | None = None,
     utiliser_reranker: bool = True,
-    appliquer_seuil: bool = True,
+    appliquer_seuil: bool = False,
     seuil_pertinence: float | None = None,
     max_par_document: int = 3,
 ) -> RapportRecherche:
@@ -585,7 +585,11 @@ def main() -> None:
     parseur.add_argument("--top-k", type=int, default=None)
     parseur.add_argument("--candidats", type=int, default=None)
     parseur.add_argument("--sans-reranker", action="store_true")
-    parseur.add_argument("--sans-seuil", action="store_true")
+    parseur.add_argument(
+    "--avec-seuil",
+    action="store_true",
+    help="Applique le seuil numérique du reranker.",
+)
     parseur.add_argument("--verbose", action="store_true")
     args = parseur.parse_args()
 
@@ -602,7 +606,7 @@ def main() -> None:
             top_k=args.top_k,
             limite_candidats=args.candidats,
             utiliser_reranker=not args.sans_reranker,
-            appliquer_seuil=not args.sans_seuil,
+            appliquer_seuil= args.sans_seuil,
         )
         afficher_rapport(rapport)
     except ErreurRecherche as exc:

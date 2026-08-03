@@ -41,13 +41,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- LLM ---
-    llm_provider: Literal["openai", "anthropic", "ollama"] = "ollama"
-    llm_api_key: str = ""
-    llm_model: str = "qwen2.5:7b"
-    llm_base_url: str | None = "http://localhost:11434"
+    # --- LLM (Ollama uniquement) ---
+    llm_provider: Literal["ollama"] = "ollama"
+    llm_model: str = "qwen3:8b"
+    llm_base_url: str | None = None
     llm_temperature: float = 0.0
     llm_max_tokens: int = 2048
+    llm_num_ctx: int = 16384
 
     # --- Embeddings / reranking ---
     embedding_model: str = "BAAI/bge-m3"
@@ -465,10 +465,17 @@ if __name__ == "__main__":
     print("-" * 62)
     print(f"Documents           : {s.documents_dir}")
     print(f"Qdrant              : {s.qdrant_mode} -> {s.qdrant_path}")
-    print(f"Collection          : {t.qdrant.nom_collection} ({t.qdrant.taille_vecteur_dense}d)")
+    print(
+    f"Collection          : {t.qdrant.nom_collection} "
+    f"({t.qdrant.taille_vecteur_dense}d)"
+)
     print(f"LLM                 : {s.llm_provider}/{s.llm_model}")
     print(f"Embeddings          : {s.embedding_model} ({s.embedding_device})")
-    print(f"OCR                 : {'actif' if s.ocr_enabled else 'inactif'} [{s.ocr_languages}]")
+    print(
+    f"OCR                 : "
+    f"{'actif' if t.ocr.active else 'inactif'} "
+    f"[{t.ocr.langues}]"
+)
     print("-" * 62)
     print(f"Découpage           : {t.decoupage.taille_chunk} / recouvrement {t.decoupage.recouvrement}")
     print(f"Fusion hybride      : {t.recherche.fusion} (k={t.recherche.rrf_k})")

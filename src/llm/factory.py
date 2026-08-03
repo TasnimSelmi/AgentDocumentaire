@@ -53,4 +53,5 @@ def construire_llm() -> ChatOllama:
         base_url=base_url,
         temperature=settings.llm_temperature,
         num_predict=settings.llm_max_tokens,
+        num_ctx=settings.llm_num_ctx,
     )

@@ -29,7 +29,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-
+from rag import validation
+from src.rag.validation import valider_contexte
 from src.config import Profil, get_config_technique, get_profil
 from src.rag.ingestion import construire_llm
 from src.rag.retrieval import (
@@ -316,23 +317,24 @@ def generer_depuis_recherche(
 
     if not question:
         raise ErreurGeneration("La question est vide.")
+    validation = valider_contexte(recherche)
 
-    if recherche.est_vide:
-        message = (
-            "Je ne dispose d'aucun passage suffisamment pertinent dans le corpus "
-            "pour répondre à cette question."
-        )
+    if not validation.suffisant:
         return ReponseRAG(
-            question=question,
-            reponse=message,
-            profil=profil.profile_name,
-            contexte_suffisant=False,
-            citations_valides=True,
-            citations_reparees=False,
-            recherche=recherche,
-            avertissements=["Aucun passage n'a franchi la sélection de pertinence."],
-            duree_secondes=round(time.perf_counter() - debut, 4),
-        )
+        question=question,
+        reponse=(
+            "Les documents disponibles ne contiennent pas suffisamment "
+            "d'informations exploitables pour répondre de manière fiable."
+        ),
+        profil=profil.profile_name,
+        contexte_suffisant=False,
+        citations_valides=True,
+        citations_reparees=False,
+        recherche=recherche,
+        avertissements=[validation.raison],
+        duree_secondes=round(time.perf_counter() - debut, 4),
+    )
+    
 
     contexte, passages_inclus = construire_contexte(
         recherche.passages,
@@ -361,7 +363,7 @@ def generer_depuis_recherche(
         citations_obligatoires=cfg_agent.citations_obligatoires,
     )
     citations_reparees = False
-    avertissements: list[str] = []
+    avertissements: list[str] = list(validation.avertissements)
 
     if not citations_valides and reparer_citations:
         try:
@@ -450,7 +452,7 @@ def generer_reponse(
     top_k: int | None = None,
     limite_candidats: int | None = None,
     utiliser_reranker: bool = True,
-    appliquer_seuil: bool = True,
+    appliquer_seuil: bool = False,
     seuil_pertinence: float | None = None,
     max_par_document: int = 3,
     limite_contexte_caracteres: int = 16_000,
@@ -534,8 +536,8 @@ def main() -> None:
     parseur.add_argument("--profil", default=None)
     parseur.add_argument("--top-k", type=int, default=None)
     parseur.add_argument("--candidats", type=int, default=None)
-    parseur.add_argument("--sans-reranker", action="store_true")
-    parseur.add_argument("--sans-seuil", action="store_true")
+    parseur.add_argument("--sans-reranker", action="store_true", help="applique explicitement le seuil du reranker")
+    parseur.add_argument("--avec-seuil", action="store_true")
     parseur.add_argument("--contexte", type=int, default=16_000)
     parseur.add_argument("--json", action="store_true", help="affiche le résultat JSON complet")
     parseur.add_argument("--verbose", action="store_true")
@@ -554,7 +556,7 @@ def main() -> None:
             top_k=args.top_k,
             limite_candidats=args.candidats,
             utiliser_reranker=not args.sans_reranker,
-            appliquer_seuil=not args.sans_seuil,
+            appliquer_seuil=args.avec_seuil,
             limite_contexte_caracteres=args.contexte,
         )
 
