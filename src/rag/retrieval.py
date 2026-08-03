@@ -456,8 +456,6 @@ def rechercher_passages(
     if top_k_final < 1:
         raise ValueError("top_k doit être supérieur ou égal à 1.")
 
-    # On récupère plus de passages que le nombre final afin de laisser au
-    # reranker et à la diversification une vraie marge de sélection.
     candidats_voulus = limite_candidats or max(
         top_k_final * 4,
         cfg.recherche.top_k_dense,

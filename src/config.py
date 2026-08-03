@@ -32,19 +32,20 @@ DOSSIER_SCHEMAS = DOSSIER_CONFIG / "schemas"
 # ===========================================================================
 
 class Settings(BaseSettings):
-    """Réglages machine. Rien de spécifique à un domaine."""
+    """Réglages dépendant de la machine et de l'environnement."""
 
     model_config = SettingsConfigDict(
         env_file=RACINE_PROJET / ".env",
         env_file_encoding="utf-8",
+        case_sensitive=False,
         extra="ignore",
     )
 
     # --- LLM ---
-    llm_provider: Literal["openai", "anthropic", "ollama"] = "openai"
+    llm_provider: Literal["openai", "anthropic", "ollama"] = "ollama"
     llm_api_key: str = ""
-    llm_model: str = "gpt-4o-mini"
-    llm_base_url: str | None = None
+    llm_model: str = "qwen2.5:7b"
+    llm_base_url: str | None = "http://localhost:11434"
     llm_temperature: float = 0.0
     llm_max_tokens: int = 2048
 
@@ -55,49 +56,58 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     reranker_enabled: bool = True
 
-    # --- Qdrant ---
+    # --- Qdrant : environnement et connexion ---
     qdrant_mode: Literal["local", "server"] = "local"
     qdrant_path: Path = Path("data/vectordb")
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
-    qdrant_collection: str = "documents"
 
-    # --- OCR ---
-    ocr_enabled: bool = True
-    ocr_languages: str = "fra+ara+eng"
-    tesseract_cmd: str = ""          # vide = binaire trouvé via le PATH
+    # --- Installation OCR ---
+    tesseract_cmd: str = ""
 
     # --- Chemins ---
     documents_dir: Path = Path("data/documents")
-    vectordb_dir: Path = Path("data/vectordb")
     logs_dir: Path = Path("data/logs")
 
     # --- Profil de domaine actif ---
     active_profile: str = "generic"
 
+    # --- Journalisation ---
     log_level: str = "INFO"
 
     @field_validator(
-        "documents_dir", "vectordb_dir", "logs_dir", "qdrant_path", mode="after"
+        "documents_dir",
+        "logs_dir",
+        "qdrant_path",
+        mode="after",
     )
     @classmethod
     def _chemin_absolu(cls, v: Path) -> Path:
-        """Rend les chemins absolus : le projet devient lançable de n'importe où."""
+        """Transforme les chemins relatifs en chemins absolus."""
         return v if v.is_absolute() else RACINE_PROJET / v
 
     def creer_dossiers(self) -> None:
-        for p in (self.documents_dir, self.vectordb_dir, self.logs_dir):
-            p.mkdir(parents=True, exist_ok=True)
+        """Crée les dossiers nécessaires au fonctionnement local."""
+        dossiers = {
+            self.documents_dir,
+            self.logs_dir,
+        }
+
+        if self.qdrant_mode == "local":
+            dossiers.add(self.qdrant_path)
+
+        for dossier in dossiers:
+            dossier.mkdir(parents=True, exist_ok=True)
 
     @property
     def chemin_registre(self) -> Path:
-        """Registre des fichiers déjà indexés (hash -> doc_id)."""
-        return self.vectordb_dir / "registry.json"
+        """Registre des fichiers déjà indexés."""
+        return self.qdrant_path / "registry.json"
 
     @property
     def chemin_entites(self) -> Path:
         """Registre des entités canoniques et de leurs alias."""
-        return self.vectordb_dir / "entities.json"
+        return self.qdrant_path / "entities.json"
 
 
 # ===========================================================================
