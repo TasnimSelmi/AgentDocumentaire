@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from qdrant_client import QdrantClient, models
 
@@ -145,12 +145,47 @@ def _schema_payload(champ: Champ) -> models.PayloadSchemaType:
     return models.PayloadSchemaType.KEYWORD
 
 
+def _assurer_indexes_payload(
+    client: QdrantClient,
+    nom_collection: str,
+    profil: Profil,
+) -> None:
+    """Crée les index de payload absents, sans recréer ceux déjà présents."""
+    infos = client.get_collection(nom_collection)
+    schema_existant = getattr(infos, "payload_schema", None) or {}
+    champs_indexes = set(schema_existant)
+
+    index_requis: list[tuple[str, models.PayloadSchemaType]] = [
+        ("doc_id", models.PayloadSchemaType.KEYWORD),
+        ("nom_fichier", models.PayloadSchemaType.KEYWORD),
+        ("categorie", models.PayloadSchemaType.KEYWORD),
+        ("source", models.PayloadSchemaType.KEYWORD),
+    ]
+    index_requis.extend(
+        (champ.nom, _schema_payload(champ))
+        for champ in profil.champs_metadonnees
+        if champ.filtrable
+    )
+
+    for nom_champ, schema in index_requis:
+        if nom_champ in champs_indexes:
+            continue
+        client.create_payload_index(
+            collection_name=nom_collection,
+            field_name=nom_champ,
+            field_schema=schema,
+            wait=True,
+        )
+        logger.debug("Index payload créé : %s (%s)", nom_champ, schema)
+
+
 def creer_collection(reinitialiser: bool = False, profil: Profil | None = None) -> None:
     """
-    Crée la collection si absente, avec ses index de payload.
+    Crée la collection si absente et garantit ses index de payload.
 
-    Les index sont indispensables : sans eux, un filtre sur 2000 documents
-    force un parcours complet et la latence s'effondre.
+    Les index sont indispensables : sans eux, un filtre sur un corpus
+    volumineux force un parcours complet et dégrade fortement la latence.
+    Les index manquants sont aussi ajoutés à une collection déjà existante.
     """
     client = get_client()
     cfg = get_config_technique().qdrant
@@ -161,38 +196,24 @@ def creer_collection(reinitialiser: bool = False, profil: Profil | None = None) 
         client.delete_collection(nom)
         logger.info("Collection '%s' supprimée.", nom)
 
-    if client.collection_exists(nom):
-        return
+    if not client.collection_exists(nom):
+        client.create_collection(
+            collection_name=nom,
+            vectors_config={
+                NOM_VECTEUR_DENSE: models.VectorParams(
+                    size=cfg.taille_vecteur_dense,
+                    distance=_DISTANCES[cfg.distance],
+                )
+            },
+            sparse_vectors_config=(
+                {NOM_VECTEUR_SPARSE: models.SparseVectorParams()}
+                if cfg.sparse_active
+                else {}
+            ),
+        )
+        logger.info("Collection '%s' créée.", nom)
 
-    client.create_collection(
-        collection_name=nom,
-        vectors_config={
-            NOM_VECTEUR_DENSE: models.VectorParams(
-                size=cfg.taille_vecteur_dense,
-                distance=_DISTANCES[cfg.distance],
-            )
-        },
-        sparse_vectors_config=(
-            {NOM_VECTEUR_SPARSE: models.SparseVectorParams()}
-            if cfg.sparse_active
-            else {}
-        ),
-    )
-    logger.info("Collection '%s' créée.", nom)
-
-    # Index techniques, toujours présents.
-    for champ_technique, schema in (
-        ("doc_id", models.PayloadSchemaType.KEYWORD),
-        ("categorie", models.PayloadSchemaType.KEYWORD),
-        ("source", models.PayloadSchemaType.KEYWORD),
-    ):
-        client.create_payload_index(nom, champ_technique, field_schema=schema)
-
-    # Index métier, pilotés par le profil YAML.
-    for champ in profil.champs_metadonnees:
-        if champ.filtrable:
-            client.create_payload_index(nom, champ.nom, field_schema=_schema_payload(champ))
-            logger.debug("Index payload : %s (%s)", champ.nom, champ.type)
+    _assurer_indexes_payload(client, nom, profil)
 
 
 def info_collection() -> dict[str, Any]:
@@ -423,6 +444,75 @@ def parcourir(
         )
         for p in points
     ]
+
+
+# Champs d'identité toujours lus, même si l'appelant n'en demande pas d'autres.
+_CHAMPS_IDENTITE_MINIMAUX = ("doc_id", "nom_fichier", "source")
+ 
+ 
+def lister_documents(
+    champs: Sequence[str] | None = None,
+    limite: int = 20_000,
+) -> list[dict[str, Any]]:
+    """
+    Renvoie l'identité des documents distincts présents dans la collection.
+ 
+    Un balayage des payloads suffit : seuls les champs d'identité sont lus,
+    sans vecteur ni texte, ce qui reste peu coûteux même sur un gros corpus.
+    Le résultat alimente le catalogue documentaire de retrieval.py, qui en
+    dérive son vocabulaire discriminant.
+ 
+    ``champs`` est la liste des clés à remonter. retrieval.py y passe les
+    conventions de nommage qu'il sait exploiter, complétées par les champs de
+    métadonnées du profil actif : aucune clé n'est donc figée ici, et un
+    corpus disposant de ses propres noms de champs reste exploitable.
+    Les clés absentes d'un payload sont simplement ignorées.
+    """
+    demandes = list(dict.fromkeys([*_CHAMPS_IDENTITE_MINIMAUX, *(champs or ())]))
+ 
+    if limite < 1:
+        raise ValueError("limite doit être supérieure ou égale à 1.")
+
+    client = get_client()
+    nom_collection = get_config_technique().qdrant.nom_collection
+    if not client.collection_exists(nom_collection):
+        return []
+
+    documents: dict[str, dict[str, Any]] = {}
+    decalage: Any = None
+
+    while len(documents) < limite:
+        taille_page = min(1024, limite - len(documents))
+        points, decalage = client.scroll(
+            collection_name=nom_collection,
+            limit=taille_page,
+            offset=decalage,
+            with_payload=demandes,
+            with_vectors=False,
+        )
+        if not points:
+            break
+ 
+        for point in points:
+            payload = point.payload or {}
+            cle = str(
+                payload.get("doc_id")
+                or payload.get("nom_fichier")
+                or payload.get("source")
+                or ""
+            ).strip()
+            if not cle or cle in documents:
+                continue
+            documents[cle] = {
+                nom: valeur
+                for nom, valeur in payload.items()
+                if valeur is not None and valeur != ""
+            }
+ 
+        if decalage is None:
+            break
+ 
+    return list(documents.values())
 
 
 def compter(filtre: models.Filter | None = None) -> int:

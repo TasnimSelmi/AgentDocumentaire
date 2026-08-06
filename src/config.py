@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     qdrant_api_key: str = ""
 
     # --- Installation OCR ---
+    ocr_enabled: bool = True
+    ocr_languages: str = "fra+ara+eng"
     tesseract_cmd: str = ""
 
     # --- Chemins ---
