@@ -33,7 +33,7 @@ Utilisation manuelle :
     python -m src.rag.retrieval "Comment installer le produit ?"
     python -m src.rag.retrieval "Quels rapports datent de 2026 ?" \
         --filtres '{"categorie": "rapport", "date_document": {"gte": "2026-01-01"}}'
-    python -m src.rag.retrieval "Total electricity consumed in 2020 in the 2022 report"
+    python -m src.rag.retrieval "Total consumed in 2020 in the 2022 report"
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ import re
 import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from src.config import Champ, Profil, get_config_technique, get_profil, get_settings
 from src.rag.embeddings import encoder_requete, reranker
@@ -58,6 +58,7 @@ from src.rag.vectorstore import (
     fermer_client,
     info_collection,
     rechercher,
+    recuperer_contexte,
 )
 
 # Le catalogue documentaire est optionnel : si vectorstore.py n'expose pas
@@ -822,7 +823,7 @@ def _annees_de_publication(jetons: Sequence[str]) -> tuple[set[int], set[int]]:
 
         # « 2021 annual financial statements » : le mot de publication suit,
         # après d'éventuels qualificatifs. Toute préposition, article ou mot
-        # porteur de sens interrompt la lecture : dans « 2020 in Clicks
+        # porteur de sens interrompt la lecture : dans « 2020 in the
         # document » comme dans « 2020 dans le rapport », l'année qualifie la
         # valeur demandée, pas le document.
         qualifiee = False
@@ -1372,6 +1373,97 @@ def _selectionner_diversifie(
     return retenus
 
 
+def _cle_chunk(resultat: Resultat) -> tuple[str, int]:
+    """Position d'un chunk dans son document, pour l'ordre et la déduplication."""
+    index = (resultat.payload or {}).get("chunk_index")
+    return (resultat.doc_id or resultat.source, int(index) if isinstance(index, int) else -1)
+
+
+def etendre_contexte(
+    retenus: list[tuple[Resultat, float | None]],
+    *,
+    rayon: int,
+    max_chunks_ajoutes: int,
+    taille_max_contexte: int,
+    recuperer: Callable[..., list[Resultat]] = recuperer_contexte,
+) -> list[tuple[Resultat, float | None]]:
+    """
+    Complète les passages retenus par leur contexte immédiat.
+
+    Pour chaque chunk retenu :
+
+    - s'il porte un ``parent_id``, tous les chunks du même parent sont
+      récupérés — c'est ce qui reconstitue un tableau entier à partir d'une
+      seule ligne trouvée ;
+    - sinon, les chunks voisins du même document sont récupérés dans un
+      rayon configurable.
+
+    Les ajouts portent un score de reranking à ``None`` : ils n'ont pas été
+    jugés pertinents par le reranker, ils ne servent qu'à compléter le
+    contexte. Ils sont insérés à leur place naturelle, juste après le chunk
+    qui les a appelés, afin que l'ordre de lecture reste cohérent.
+
+    Le nombre et la taille des ajouts sont plafonnés : l'objectif est de
+    donner au LLM un contexte complet, pas de lui envoyer le corpus.
+    """
+    if not retenus or (rayon <= 0 and max_chunks_ajoutes <= 0):
+        return retenus
+
+    deja_presents = {resultat.point_id for resultat, _ in retenus}
+    budget_caracteres = taille_max_contexte - sum(
+        len(resultat.texte) for resultat, _ in retenus
+    )
+    ajoutes = 0
+    resultat_final: list[tuple[Resultat, float | None]] = []
+    groupes_traites: set[str] = set()
+
+    for resultat, score in retenus:
+        resultat_final.append((resultat, score))
+
+        if ajoutes >= max_chunks_ajoutes or budget_caracteres <= 0:
+            continue
+
+        payload = resultat.payload or {}
+        parent_id = payload.get("parent_id")
+        doc_id = resultat.doc_id
+        if not doc_id:
+            continue
+
+        cle_groupe = f"{doc_id}|{parent_id}" if parent_id else ""
+        if cle_groupe and cle_groupe in groupes_traites:
+            continue
+
+        try:
+            if parent_id:
+                groupes_traites.add(cle_groupe)
+                voisins = recuperer(doc_id, parent_id=str(parent_id))
+            else:
+                _, index = _cle_chunk(resultat)
+                if index < 0:
+                    continue
+                indices = [
+                    i for i in range(index - rayon, index + rayon + 1) if i >= 0 and i != index
+                ]
+                voisins = recuperer(doc_id, indices=indices)
+        except Exception as exc:  # noqa: BLE001 — le contexte est un bonus
+            logger.warning("Expansion du contexte impossible (%s) : %s", doc_id, exc)
+            continue
+
+        for voisin in sorted(voisins, key=_cle_chunk):
+            if voisin.point_id in deja_presents:
+                continue
+            if ajoutes >= max_chunks_ajoutes or len(voisin.texte) > budget_caracteres:
+                break
+            resultat_final.append((voisin, None))
+            deja_presents.add(voisin.point_id)
+            budget_caracteres -= len(voisin.texte)
+            ajoutes += 1
+
+    if ajoutes:
+        logger.debug("Expansion du contexte : %d chunks ajoutés.", ajoutes)
+    return resultat_final
+
+
 def _hors_perimetre(resultat: Resultat, perimetre: PerimetreDocumentaire) -> bool:
     """Dernier garde-fou : un chunk hors périmètre ne doit pas passer.
 
@@ -1592,6 +1684,22 @@ def rechercher_passages(
         limite=top_k_final,
         max_par_document=max_par_document_effectif,
     )
+
+    cfg_voisins = cfg.decoupage.voisins
+    if cfg_voisins.actif and retenus:
+        retenus = etendre_contexte(
+            retenus,
+            rayon=cfg_voisins.rayon,
+            max_chunks_ajoutes=cfg_voisins.max_chunks_ajoutes,
+            taille_max_contexte=cfg_voisins.taille_max_contexte,
+        )
+        if perimetre.contraignant:
+            # Un voisin reste soumis au cloisonnement documentaire.
+            retenus = [
+                (resultat, score)
+                for resultat, score in retenus
+                if not _hors_perimetre(resultat, perimetre)
+            ]
 
     passages = [
         _passage_depuis_resultat(resultat, rang, score_reranking)

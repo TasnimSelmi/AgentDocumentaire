@@ -37,6 +37,11 @@ from src.config import (
     get_settings,
 )
 from src.llm.factory import construire_llm
+from src.rag.chunking import (
+    Chunk,
+    decouper_pages_recursif,
+    decouper_pages_structure,
+)
 from src.rag.embeddings import encoder, encoder_dense_seul, precharger_modeles
 from src.rag.loaders import ErreurChargement, Page, charger_document
 from src.rag.normalization import (
@@ -256,12 +261,22 @@ def identifiant_version_document(
 # 2. Découpage
 # ===========================================================================
 
-@dataclass
-class Chunk:
-    """Un fragment de texte, avant vectorisation."""
-    index: int
-    texte: str
-    page: int | None = None
+# `Chunk` est défini dans `src.rag.chunking` et ré-exporté ici : les champs
+# historiques (index, texte, page) sont inchangés, les champs de structure
+# sont optionnels et valent None quand l'information n'existe pas.
+
+
+def _construire_splitter() -> Any:
+    """Construit le splitter récursif LangChain à partir de la configuration."""
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    cfg = get_config_technique().decoupage
+    return RecursiveCharacterTextSplitter(
+        chunk_size=cfg.taille_chunk,
+        chunk_overlap=cfg.recouvrement,
+        separators=cfg.separateurs,
+        length_function=len,
+    )
 
 
 def decouper(pages: list[Page]) -> list[Chunk]:
@@ -271,27 +286,34 @@ def decouper(pages: list[Page]) -> list[Chunk]:
     Découper page par page plutôt que sur le texte concaténé permet de
     citer une page exacte dans les réponses — sans quoi les citations
     seraient approximatives.
+
+    Deux stratégies sont disponibles, choisies par `decoupage.strategie` :
+
+    - ``recursive`` : découpage historique par taille fixe ;
+    - ``structure_aware`` : segmentation en blocs (titre, paragraphe, liste,
+      tableau) avant découpage, avec en-tête de tableau répété et
+      regroupement parent-child.
+
+    La signature et le type de retour sont inchangés.
     """
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-
     cfg = get_config_technique().decoupage
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=cfg.taille_chunk,
-        chunk_overlap=cfg.recouvrement,
-        separators=cfg.separateurs,
-        length_function=len,
-    )
+    splitter = _construire_splitter()
 
-    chunks: list[Chunk] = []
-    compteur = 0
-    for page in pages:
-        if not page.texte.strip():
-            continue
-        for morceau in splitter.split_text(page.texte):
-            if morceau.strip():
-                chunks.append(Chunk(index=compteur, texte=morceau.strip(), page=page.numero))
-                compteur += 1
-    return chunks
+    if cfg.strategie != "structure_aware":
+        return decouper_pages_recursif(pages, splitter)
+
+    return decouper_pages_structure(
+        pages,
+        taille_chunk=cfg.taille_chunk,
+        taille_parent=cfg.parent_child.taille_parent,
+        parent_child_actif=cfg.parent_child.actif,
+        tables_actives=cfg.tables.actif,
+        lignes_par_chunk=cfg.tables.lignes_par_chunk,
+        recouvrement_lignes=cfg.tables.recouvrement_lignes,
+        conserver_entete=cfg.tables.conserver_entete,
+        lignes_table_min=cfg.tables.lignes_min,
+        splitter=splitter,
+    )
 
 
 # ===========================================================================
@@ -488,6 +510,32 @@ def decouvrir_fichiers(dossier: Path, extensions: list[str]) -> list[Path]:
     return retenus
 
 
+def _payload_structure(chunk: Chunk, doc_id: str) -> dict[str, Any]:
+    """
+    Champs de structure ajoutés au payload Qdrant.
+
+    Tous sont optionnels : un chunk produit par la stratégie `recursive` n'en
+    porte aucun, et les anciens payloads restent lisibles tels quels. Les
+    identifiants de parent et de tableau sont préfixés par le `doc_id` pour
+    rester uniques dans toute la collection.
+    """
+    champs: dict[str, Any] = {}
+    if chunk.type_bloc:
+        champs["type_bloc"] = chunk.type_bloc
+    if chunk.section_title:
+        champs["section_title"] = chunk.section_title
+    if chunk.parent_id:
+        champs["parent_id"] = f"{doc_id}:{chunk.parent_id}"
+    if chunk.table_id:
+        champs["table_id"] = f"{doc_id}:{chunk.table_id}"
+    if chunk.ordre_dans_parent is not None:
+        champs["ordre_dans_parent"] = chunk.ordre_dans_parent
+    if chunk.is_table:
+        champs["is_table"] = True
+        champs["header_repeated"] = chunk.header_repeated
+    return champs
+
+
 def _traiter_fichier(
     chemin: Path,
     doc_id: str,
@@ -559,7 +607,7 @@ def _traiter_fichier(
             texte=c.texte,
             dense=enc.dense[i],
             sparse=enc.sparse[i],
-            payload={**payload_commun, "page": c.page},
+            payload={**payload_commun, "page": c.page, **_payload_structure(c, doc_id)},
         )
         for i, c in enumerate(chunks)
     ]

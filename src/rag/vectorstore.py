@@ -160,6 +160,10 @@ def _assurer_indexes_payload(
         ("nom_fichier", models.PayloadSchemaType.KEYWORD),
         ("categorie", models.PayloadSchemaType.KEYWORD),
         ("source", models.PayloadSchemaType.KEYWORD),
+        # Nécessaires à l'expansion du contexte (parent et voisins).
+        ("chunk_index", models.PayloadSchemaType.INTEGER),
+        ("parent_id", models.PayloadSchemaType.KEYWORD),
+        ("table_id", models.PayloadSchemaType.KEYWORD),
     ]
     index_requis.extend(
         (champ.nom, _schema_payload(champ))
@@ -277,6 +281,48 @@ def indexer(chunks: list[ChunkIndexable]) -> int:
         total += len(points)
 
     return total
+
+
+def recuperer_contexte(
+    doc_id: str,
+    *,
+    parent_id: str | None = None,
+    indices: Sequence[int] | None = None,
+    limite: int = 50,
+) -> list[Resultat]:
+    """
+    Récupère les chunks voisins d'un chunk déjà trouvé.
+
+    Deux modes, dans cet ordre de préférence :
+
+    - ``parent_id`` : tous les chunks du même groupe logique (un tableau
+      complet, une section) ;
+    - ``indices`` : les chunks du même document dont ``chunk_index`` figure
+      dans la liste, ce qui couvre le voisinage immédiat.
+
+    Le filtre porte toujours sur ``doc_id`` : un voisin ne peut jamais
+    provenir d'un autre document.
+    """
+    if not doc_id or (parent_id is None and not indices):
+        return []
+
+    conditions: list[models.FieldCondition] = [
+        models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))
+    ]
+    if parent_id is not None:
+        conditions.append(
+            models.FieldCondition(
+                key="parent_id", match=models.MatchValue(value=parent_id)
+            )
+        )
+    else:
+        conditions.append(
+            models.FieldCondition(
+                key="chunk_index", match=models.MatchAny(any=list(indices or []))
+            )
+        )
+
+    return parcourir(models.Filter(must=conditions), limite=limite)
 
 
 def supprimer_document(doc_id: str) -> None:

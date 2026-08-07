@@ -71,8 +71,16 @@ class Settings(BaseSettings):
     documents_dir: Path = Path("data/documents")
     logs_dir: Path = Path("data/logs")
 
-    # --- Profil de domaine actif ---
+    # --- Profil technique actif (config/schemas/<nom>.yaml) ---
+    # Pilote la taxonomie, les métadonnées et le schéma d'extraction utilisés
+    # par l'ingestion et le retrieval. Ne pas confondre avec le profil de
+    # domaine ci-dessous, qui ne sert qu'au vocabulaire métier.
     active_profile: str = "generic"
+
+    # --- Profil de domaine (src/profiling) ---
+    domain_profiles_dir: Path = Path("profiles/domains")
+    active_domain_profile: str | None = None
+    domain_profile_output_language: str = "fr"
 
     # --- Journalisation ---
     log_level: str = "INFO"
@@ -81,6 +89,7 @@ class Settings(BaseSettings):
         "documents_dir",
         "logs_dir",
         "qdrant_path",
+        "domain_profiles_dir",
         mode="after",
     )
     @classmethod
@@ -93,6 +102,7 @@ class Settings(BaseSettings):
         dossiers = {
             self.documents_dir,
             self.logs_dir,
+            self.domain_profiles_dir,
         }
 
         if self.qdrant_mode == "local":

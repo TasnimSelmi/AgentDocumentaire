@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from src.config import ConfigOCR, Settings, get_config_technique, get_settings
 
@@ -55,10 +56,84 @@ def _charger_texte(chemin: Path) -> list[Page]:
     return [Page(numero=1, texte=contenu.strip())]
 
 
+def _table_en_lignes(table: list[list[str | None]]) -> list[str]:
+    """
+    Convertit une table pdfplumber en lignes « a | b | c ».
+
+    Le format est identique à celui produit par les loaders docx, xlsx et
+    csv : le découpage structure-aware reconnaît ainsi les tableaux de tous
+    les formats avec la même règle.
+    """
+    lignes: list[str] = []
+    for ligne in table or []:
+        cellules = [
+            " ".join(str(cellule).split()) if cellule is not None else ""
+            for cellule in ligne
+        ]
+        if any(cellules):
+            lignes.append(" | ".join(cellules))
+    return lignes
+
+
+def _tables_fiables(page: Any) -> list[list[str]]:
+    """
+    Extrait les tableaux d'une page, en écartant ceux qui n'en sont pas.
+
+    pdfplumber détecte parfois des « tableaux » d'une seule colonne sur du
+    texte mis en page. Un tableau est retenu s'il a au moins deux lignes et
+    deux colonnes exploitables.
+    """
+    try:
+        tables = page.extract_tables() or []
+    except Exception as exc:  # noqa: BLE001 — extraction best effort
+        logger.debug("Extraction de tableaux impossible : %s", exc)
+        return []
+
+    retenues: list[list[str]] = []
+    for table in tables:
+        lignes = _table_en_lignes(table)
+        if len(lignes) >= 2 and all(ligne.count("|") >= 1 for ligne in lignes[:2]):
+            retenues.append(lignes)
+    return retenues
+
+
+def _sans_doublons_de_table(texte: str, tables: list[list[str]]) -> str:
+    """
+    Retire du texte brut les lignes déjà couvertes par un tableau extrait.
+
+    Sans cette étape, chaque valeur d'un tableau apparaîtrait deux fois dans
+    la page : une fois en texte désordonné, une fois en ligne structurée.
+    La comparaison se fait sur les cellules, car pdfplumber restitue les
+    mêmes valeurs avec des espacements différents selon la méthode.
+    """
+    if not tables:
+        return texte
+
+    empreintes = {
+        _empreinte_ligne(ligne) for lignes in tables for ligne in lignes
+    }
+    conservees = [
+        ligne
+        for ligne in texte.splitlines()
+        if not ligne.strip() or _empreinte_ligne(ligne) not in empreintes
+    ]
+    return "\n".join(conservees)
+
+
+def _empreinte_ligne(ligne: str) -> str:
+    """Signature d'une ligne, insensible aux espaces et aux séparateurs."""
+    return " ".join(ligne.replace("|", " ").split()).casefold()
+
+
 def _charger_pdf(chemin: Path) -> list[Page]:
     """
     PDF : extraction de la couche texte via pdfplumber.
+
     pdfplumber gère mieux la mise en page multi-colonne que pypdf.
+    Les tableaux détectés sont extraits séparément et rendus au format
+    « a | b | c », puis retirés du texte brut pour éviter de dupliquer les
+    mêmes valeurs. Si aucun tableau fiable n'est détecté, le comportement
+    se réduit à l'ancien `extract_text()`.
     L'OCR éventuel est décidé plus haut, pas ici.
     """
     import pdfplumber
@@ -67,6 +142,13 @@ def _charger_pdf(chemin: Path) -> list[Page]:
     with pdfplumber.open(chemin) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
             texte = page.extract_text() or ""
+            tables = _tables_fiables(page)
+
+            if tables:
+                texte = _sans_doublons_de_table(texte, tables)
+                blocs_tables = ["\n".join(lignes) for lignes in tables]
+                texte = "\n\n".join([texte.strip(), *blocs_tables]).strip()
+
             pages.append(Page(numero=i, texte=texte.strip()))
     return pages
 
