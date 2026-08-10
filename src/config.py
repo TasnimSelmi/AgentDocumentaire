@@ -126,13 +126,57 @@ class Settings(BaseSettings):
 # 2. Paramètres techniques (config/default.yaml)
 # ===========================================================================
 
+class ConfigTables(BaseModel):
+    actif: bool = True
+    conserver_entete: bool = True
+    lignes_par_chunk: int = Field(default=12, ge=1)
+    recouvrement_lignes: int = Field(default=2, ge=0)
+
+    @model_validator(mode="after")
+    def _recouvrement_lignes_coherent(self) -> ConfigTables:
+        if self.recouvrement_lignes >= self.lignes_par_chunk:
+            raise ValueError(
+                "recouvrement_lignes doit être inférieur à lignes_par_chunk."
+            )
+        return self
+
+
+class ConfigParentChild(BaseModel):
+    actif: bool = True
+    taille_parent: int = Field(default=5000, ge=1)
+
+
+class ConfigVoisins(BaseModel):
+    actif: bool = True
+    rayon: int = Field(default=1, ge=0)
+    max_chunks_ajoutes: int = Field(default=6, ge=0)
+    taille_max_contexte: int = Field(default=12000, ge=1)
+
 class ConfigDecoupage(BaseModel):
-    strategie: Literal["recursive", "semantic"] = "recursive"
+    strategie: Literal[
+        "recursive",
+        "semantic",
+        "structure_aware",
+    ] = "recursive"
+
     taille_chunk: int = 1000
     recouvrement: int = 150
+
     separateurs: list[str] = Field(
         default_factory=lambda: ["\n\n", "\n", ". ", " ", ""]
     )
+
+    tables: ConfigTables = Field(default_factory=ConfigTables)
+    parent_child: ConfigParentChild = Field(default_factory=ConfigParentChild)
+    voisins: ConfigVoisins = Field(default_factory=ConfigVoisins)
+
+    @model_validator(mode="after")
+    def _recouvrement_coherent(self) -> ConfigDecoupage:
+        if self.recouvrement >= self.taille_chunk:
+            raise ValueError(
+                "Le recouvrement doit être inférieur à la taille du chunk."
+            )
+        return self
 
     @model_validator(mode="after")
     def _recouvrement_coherent(self) -> ConfigDecoupage:

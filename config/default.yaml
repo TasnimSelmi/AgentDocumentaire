@@ -1,10 +1,32 @@
 # Paramètres techniques, indépendants du domaine.
 
 decoupage:
-  strategie: recursive
-  taille_chunk: 1000
-  recouvrement: 150
-  separateurs: ["\n\n", "\n", ". ", " ", ""]
+  strategie: structure_aware
+  taille_chunk: 1800
+  recouvrement: 250
+
+  separateurs:
+    - "\n\n"
+    - "\n"
+    - ". "
+    - " "
+    - ""
+
+  tables:
+    actif: true
+    conserver_entete: true
+    lignes_par_chunk: 12
+    recouvrement_lignes: 2
+
+  parent_child:
+    actif: true
+    taille_parent: 5000
+
+  voisins:
+    actif: true
+    rayon: 1
+    max_chunks_ajoutes: 6
+    taille_max_contexte: 12000
 
 ingestion:
   extensions_supportees:

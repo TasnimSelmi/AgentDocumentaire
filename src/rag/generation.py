@@ -34,6 +34,7 @@ from typing import Any, Sequence
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.rag.validation import valider_citations, valider_contexte
 from src.config import Profil, get_config_technique, get_profil
+from src.profiling import DomainProfile, load_active_domain_profile
 from src.rag.ingestion import construire_llm
 from src.rag.retrieval import (
     ErreurRecherche,
@@ -88,6 +89,7 @@ class ReponseRAG:
     contexte_suffisant: bool
     citations_valides: bool
     citations_reparees: bool
+    profil_domaine: str | None = None
     sources: list[SourceCitee] = field(default_factory=list)
     recherche: RapportRecherche | None = None
     avertissements: list[str] = field(default_factory=list)
@@ -188,16 +190,48 @@ def construire_contexte(
 # ===========================================================================
 
 
-def _instruction_langue(profil: Profil) -> str:
+def _instruction_langue(
+    profil: Profil,
+    profil_domaine: DomainProfile | None = None,
+) -> str:
+    if profil_domaine is not None:
+        return (
+            f"Réponds dans la langue suivante : "
+            f"{profil_domaine.output_language}."
+        )
+
     if profil.langue.conserver_langue_source:
         return (
             "Réponds dans la langue de la question. Conserve les noms propres "
             "et les extraits cités dans leur langue d'origine."
         )
+
     return f"Réponds dans la langue suivante : {profil.langue.langue_sortie}."
 
+def _bloc_profil_domaine(
+    profil_domaine: DomainProfile | None,
+) -> str:
+    if profil_domaine is None:
+        return ""
 
-def _message_systeme(profil: Profil) -> str:
+    return f"""
+{profil_domaine.bloc_contexte_domaine()}
+
+UTILISATION DU PROFIL DE DOMAINE
+- Utilise ce profil uniquement pour comprendre le domaine, son vocabulaire
+  et les concepts métier importants.
+- Le profil de domaine n'est jamais une source factuelle.
+- Toutes les affirmations factuelles doivent provenir exclusivement des
+  sources documentaires fournies.
+- Si une information du profil semble entrer en conflit avec les extraits,
+  les extraits documentaires sont prioritaires.
+""".strip()
+
+
+def _message_systeme(
+    profil: Profil,
+    profil_domaine: DomainProfile | None = None,
+) -> str:
     cfg_agent = get_config_technique().agent
     obligation = (
         "Chaque affirmation factuelle doit être accompagnée d'au moins une "
@@ -205,8 +239,10 @@ def _message_systeme(profil: Profil) -> str:
         if cfg_agent.citations_obligatoires
         else "Ajoute des citations [S1], [S2], etc. lorsque cela aide à vérifier la réponse."
     )
+    contexte_domaine = _bloc_profil_domaine(profil_domaine)
+    bloc_domaine = f"\n\n{contexte_domaine}" if contexte_domaine else ""
 
-    return f"""Tu es le composant de génération d'un système RAG documentaire.
+    return f"""Tu es le composant de génération d'un système RAG documentaire.{bloc_domaine}
 
 RÈGLES DE FIDÉLITÉ
 - Utilise uniquement les informations présentes dans les extraits fournis.
@@ -243,7 +279,7 @@ STYLE
 - Réponds directement à la question.
 - Sois précis et structure la réponse seulement lorsque cela améliore la lisibilité.
 - N'affiche pas de bibliographie inventée : les références utilisables sont uniquement [S1], [S2], etc.
-- {_instruction_langue(profil)}
+- {_instruction_langue(profil, profil_domaine)}
 """
 
 
@@ -333,6 +369,7 @@ def _texte_message(reponse: Any) -> str:
 def _reparer_citations(
     llm: Any,
     profil: Profil,
+    profil_domaine: DomainProfile | None,
     question: str,
     contexte: str,
     reponse_initiale: str,
@@ -354,7 +391,12 @@ aucun identifiant absent de la liste autorisée. Vérifie pour chaque valeur que
 le champ « Document » de l'extrait cité correspond bien au document demandé."""
 
     messages = [
-        SystemMessage(content=_message_systeme(profil)),
+        SystemMessage(
+    content=_message_systeme(
+        profil,
+        profil_domaine,
+    )
+),
         HumanMessage(content=_message_utilisateur(question, contexte, perimetre)),
         HumanMessage(content=correction),
     ]
@@ -397,6 +439,7 @@ def _refus(
     profil: Profil,
     raisons: list[str],
     debut: float,
+    profil_domaine: DomainProfile | None = None,
 ) -> ReponseRAG:
     """Construit une réponse de refus sans jamais appeler le LLM."""
     return ReponseRAG(
@@ -406,6 +449,9 @@ def _refus(
         contexte_suffisant=False,
         citations_valides=True,
         citations_reparees=False,
+        profil_domaine=(
+            profil_domaine.profile_name if profil_domaine is not None else None
+        ),
         recherche=recherche,
         avertissements=[raison for raison in raisons if raison],
         duree_secondes=round(time.perf_counter() - debut, 4),
@@ -422,6 +468,7 @@ def generer_depuis_recherche(
     recherche: RapportRecherche,
     *,
     profil: Profil | None = None,
+    profil_domaine: DomainProfile | None = None,
     llm: Any | None = None,
     limite_contexte_caracteres: int = 16_000,
     reparer_citations: bool = True,
@@ -429,6 +476,18 @@ def generer_depuis_recherche(
     """Génère une réponse à partir d'un rapport de recherche déjà calculé."""
     debut = time.perf_counter()
     profil = profil or get_profil(recherche.profil)
+    if profil_domaine is None:
+        profil_domaine = load_active_domain_profile()
+
+    if profil_domaine is not None:
+        logger.info(
+            "Profil de domaine utilisé : %s (%s).",
+            profil_domaine.profile_name,
+            profil_domaine.domain,
+        )
+    else:
+        logger.info("Aucun profil de domaine actif : génération sans contexte métier.")
+
     cfg_agent = get_config_technique().agent
     question = " ".join(str(question).split())
 
@@ -451,11 +510,19 @@ def generer_depuis_recherche(
             profil,
             [f"Recherche sans passage exploitable : {recherche.motif_absence}."],
             debut,
+            profil_domaine=profil_domaine,
         )
 
     verdict = valider_contexte(recherche)
     if not verdict.suffisant:
-        return _refus(question, recherche, profil, [verdict.raison], debut)
+        return _refus(
+            question,
+            recherche,
+            profil,
+            [verdict.raison],
+            debut,
+            profil_domaine=profil_domaine,
+        )
 
     contexte, passages_inclus = construire_contexte(
         recherche.passages,
@@ -466,9 +533,20 @@ def generer_depuis_recherche(
 
     llm = llm or construire_llm()
     messages = [
-        SystemMessage(content=_message_systeme(profil)),
-        HumanMessage(content=_message_utilisateur(question, contexte, perimetre)),
-    ]
+    SystemMessage(
+        content=_message_systeme(
+            profil,
+            profil_domaine,
+        )
+    ),
+    HumanMessage(
+        content=_message_utilisateur(
+            question,
+            contexte,
+            perimetre,
+        )
+    ),
+]
 
     try:
         reponse = _texte_message(llm.invoke(messages))
@@ -492,6 +570,7 @@ def generer_depuis_recherche(
             reponse_corrigee = _reparer_citations(
                 llm=llm,
                 profil=profil,
+                profil_domaine=profil_domaine,
                 question=question,
                 contexte=contexte,
                 reponse_initiale=reponse,
@@ -573,6 +652,9 @@ def generer_depuis_recherche(
         contexte_suffisant=True,
         citations_valides=citations_valides,
         citations_reparees=citations_reparees,
+        profil_domaine=(
+            profil_domaine.profile_name if profil_domaine is not None else None
+        ),
         sources=sources,
         recherche=recherche,
         avertissements=avertissements,
@@ -586,6 +668,7 @@ def generer_reponse(
     criteres: dict[str, Any] | None = None,
     *,
     profil: Profil | None = None,
+    profil_domaine: DomainProfile | None = None,
     top_k: int | None = None,
     limite_candidats: int | None = None,
     utiliser_reranker: bool = True,
@@ -619,6 +702,7 @@ def generer_reponse(
         question=question,
         recherche=recherche,
         profil=profil,
+        profil_domaine=profil_domaine,
         llm=llm,
         limite_contexte_caracteres=limite_contexte_caracteres,
     )
@@ -633,7 +717,10 @@ def generer_reponse(
 
 def afficher_reponse(resultat: ReponseRAG) -> None:
     print("\n" + "=" * 76)
-    print(f"RÉPONSE RAG — profil « {resultat.profil} »")
+    titre_profil = f"profil technique « {resultat.profil} »"
+    if resultat.profil_domaine:
+        titre_profil += f" | domaine « {resultat.profil_domaine} »"
+    print(f"RÉPONSE RAG — {titre_profil}")
     print("=" * 76)
     print(resultat.reponse)
 
@@ -665,6 +752,8 @@ def afficher_reponse(resultat: ReponseRAG) -> None:
                 "  Année(s) de public.: "
                 + ", ".join(str(a) for a in perimetre.annees_publication)
             )
+    print(f"  Profil technique   : {resultat.profil}")
+    print(f"  Profil domaine     : {resultat.profil_domaine or 'aucun'}")
     print(f"  Contexte suffisant : {resultat.contexte_suffisant}")
     print(f"  Citations valides  : {resultat.citations_valides}")
     print(f"  Citations réparées : {resultat.citations_reparees}")
@@ -689,6 +778,14 @@ def main() -> None:
     parseur.add_argument("question")
     parseur.add_argument("--filtres", default=None, help="objet JSON de filtres")
     parseur.add_argument("--profil", default=None)
+    parseur.add_argument(
+        "--profil-domaine",
+        default=None,
+        help=(
+            "Profil de domaine à utiliser pour cette requête. "
+            "Sans cette option, ACTIVE_DOMAIN_PROFILE est chargé automatiquement."
+        ),
+    )
     parseur.add_argument("--top-k", type=int, default=None)
     parseur.add_argument("--candidats", type=int, default=None)
     parseur.add_argument(
@@ -728,6 +825,11 @@ def main() -> None:
             question=args.question,
             criteres=_charger_json_objet(args.filtres),
             profil=get_profil(args.profil),
+            profil_domaine=(
+                load_active_domain_profile(args.profil_domaine)
+                if args.profil_domaine
+                else None
+            ),
             top_k=args.top_k,
             limite_candidats=args.candidats,
             utiliser_reranker=not args.sans_reranker,
