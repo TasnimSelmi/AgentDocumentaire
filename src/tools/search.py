@@ -40,6 +40,7 @@ from src.rag.retrieval import (
     rechercher_passages,
 )
 from src.tools.base import (
+    ContexteOutil,
     DefinitionOutil,
     ResultatOutil,
     SourceOutil,
@@ -247,7 +248,11 @@ def _passage_pour_agent(passage: Any) -> dict[str, Any]:
 # ===========================================================================
 
 
-def _executer_search(**kwargs: Any) -> ResultatOutil:
+def _executer_search(
+    *,
+    contexte: ContexteOutil | None = None,
+    **kwargs: Any,
+) -> ResultatOutil:
     """
     Exécute la recherche documentaire.
 

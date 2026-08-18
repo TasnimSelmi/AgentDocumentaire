@@ -45,6 +45,7 @@ from src.rag.retrieval import (
     rechercher_passages,
 )
 from src.rag.vectorstore import fermer_client
+from src.llm.common import texte_message
 
 logger = logging.getLogger(__name__)
 
@@ -350,22 +351,6 @@ Rédige maintenant la réponse sourcée."""
 # ===========================================================================
 
 
-def _texte_message(reponse: Any) -> str:
-    """Extrait le texte d'une réponse LangChain, quel que soit le provider."""
-    contenu = getattr(reponse, "content", reponse)
-    if isinstance(contenu, str):
-        return contenu.strip()
-    if isinstance(contenu, list):
-        morceaux: list[str] = []
-        for element in contenu:
-            if isinstance(element, str):
-                morceaux.append(element)
-            elif isinstance(element, dict) and isinstance(element.get("text"), str):
-                morceaux.append(element["text"])
-        return "\n".join(morceaux).strip()
-    return str(contenu).strip()
-
-
 def _reparer_citations(
     llm: Any,
     profil: Profil,
@@ -400,7 +385,7 @@ le champ « Document » de l'extrait cité correspond bien au document demandé.
         HumanMessage(content=_message_utilisateur(question, contexte, perimetre)),
         HumanMessage(content=correction),
     ]
-    return _texte_message(llm.invoke(messages))
+    return texte_message(llm.invoke(messages))
 
 
 # ===========================================================================
@@ -549,7 +534,7 @@ def generer_depuis_recherche(
 ]
 
     try:
-        reponse = _texte_message(llm.invoke(messages))
+        reponse = texte_message(llm.invoke(messages))
     except Exception as exc:  # noqa: BLE001 — normalisation de l'erreur provider
         raise ErreurGeneration(f"Échec de l'appel au LLM : {exc}") from exc
 

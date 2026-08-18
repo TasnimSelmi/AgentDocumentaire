@@ -178,12 +178,6 @@ class ConfigDecoupage(BaseModel):
             )
         return self
 
-    @model_validator(mode="after")
-    def _recouvrement_coherent(self) -> ConfigDecoupage:
-        if self.recouvrement >= self.taille_chunk:
-            raise ValueError("Le recouvrement doit être inférieur à la taille du chunk.")
-        return self
-
 
 class ConfigIngestion(BaseModel):
     extensions_supportees: list[str] = Field(
