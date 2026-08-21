@@ -1,0 +1,101 @@
+{
+  "resume": {
+    "jeu": "evaluation/data/uda_400.jsonl",
+    "configurations_lancees": [
+      "C0_reference",
+      "C1_sans_reranker",
+      "C2_avec_seuil",
+      "C4_sans_diversification"
+    ],
+    "reference": "C0_reference",
+    "top_k": 30,
+    "limite": 150
+  },
+  "details": [
+    {
+      "configuration": "C0_reference",
+      "description": "Configuration actuelle du projet, telle quelle.",
+      "statut": "ok",
+      "questions": 135,
+      "duree_moyenne_s": 1.182,
+      "hit@1": 0.3037,
+      "hit@3": 0.3704,
+      "hit@5": 0.3926,
+      "hit@10": 0.4593,
+      "mrr@10": 0.3491,
+      "recall@10": 0.4593
+    },
+    {
+      "configuration": "C1_sans_reranker",
+      "description": "Le reranker BGE apporte-t-il un gain mesurable ?",
+      "statut": "ok",
+      "questions": 150,
+      "duree_moyenne_s": 0.651,
+      "hit@1": 0.2267,
+      "delta_hit@1": -0.077,
+      "hit@3": 0.32,
+      "delta_hit@3": -0.0504,
+      "hit@5": 0.3467,
+      "delta_hit@5": -0.0459,
+      "hit@10": 0.4,
+      "delta_hit@10": -0.0593,
+      "mrr@10": 0.2818,
+      "delta_mrr@10": -0.0673,
+      "recall@10": 0.4,
+      "delta_recall@10": -0.0593
+    },
+    {
+      "configuration": "C2_avec_seuil",
+      "description": "Le seuil de pertinence filtre-t-il utilement ?",
+      "statut": "ok",
+      "questions": 150,
+      "duree_moyenne_s": 1.302,
+      "hit@1": 0.2667,
+      "delta_hit@1": -0.037,
+      "hit@3": 0.32,
+      "delta_hit@3": -0.0504,
+      "hit@5": 0.3267,
+      "delta_hit@5": -0.0659,
+      "hit@10": 0.3467,
+      "delta_hit@10": -0.1126,
+      "mrr@10": 0.2967,
+      "delta_mrr@10": -0.0524,
+      "recall@10": 0.3467,
+      "delta_recall@10": -0.1126
+    },
+    {
+      "configuration": "C3_sans_resolution_document",
+      "description": "Part du score due au cloisonnement documentaire plutôt qu'à la recherche sémantique.",
+      "statut": "ECHEC"
+    },
+    {
+      "configuration": "C4_sans_diversification",
+      "description": "La limite de passages par document aide-t-elle ou nuit-elle ?",
+      "statut": "ok",
+      "questions": 150,
+      "duree_moyenne_s": 1.18,
+      "hit@1": 0.2933,
+      "delta_hit@1": -0.0104,
+      "hit@3": 0.36,
+      "delta_hit@3": -0.0104,
+      "hit@5": 0.38,
+      "delta_hit@5": -0.0126,
+      "hit@10": 0.44,
+      "delta_hit@10": -0.0193,
+      "mrr@10": 0.3364,
+      "delta_mrr@10": -0.0127,
+      "recall@10": 0.44,
+      "delta_recall@10": -0.0193
+    },
+    {
+      "configuration": "C5_dense_seul",
+      "description": "Le vecteur sparse de BGE-M3 apporte-t-il quelque chose au dense ?",
+      "statut": "ECHEC"
+    },
+    {
+      "configuration": "C6_sans_voisins",
+      "description": "L'expansion par chunks voisins améliore-t-elle la couverture ?",
+      "statut": "ECHEC"
+    }
+  ]
+}

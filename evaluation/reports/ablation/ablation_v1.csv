@@ -1,0 +1,8 @@
+configuration,description,statut,questions,duree_moyenne_s,hit@1,hit@3,hit@5,hit@10,mrr@10,recall@10,delta_hit@1,delta_hit@3,delta_hit@5,delta_hit@10,delta_mrr@10,delta_recall@10
+C0_reference,"Configuration actuelle du projet, telle quelle.",ok,135.0,1.182,0.3037,0.3704,0.3926,0.4593,0.3491,0.4593,,,,,,
+C1_sans_reranker,Le reranker BGE apporte-t-il un gain mesurable ?,ok,150.0,0.651,0.2267,0.32,0.3467,0.4,0.2818,0.4,-0.077,-0.0504,-0.0459,-0.0593,-0.0673,-0.0593
+C2_avec_seuil,Le seuil de pertinence filtre-t-il utilement ?,ok,150.0,1.302,0.2667,0.32,0.3267,0.3467,0.2967,0.3467,-0.037,-0.0504,-0.0659,-0.1126,-0.0524,-0.1126
+C3_sans_resolution_document,Part du score due au cloisonnement documentaire plutôt qu'à la recherche sémantique.,ECHEC,,,,,,,,,,,,,,
+C4_sans_diversification,La limite de passages par document aide-t-elle ou nuit-elle ?,ok,150.0,1.18,0.2933,0.36,0.38,0.44,0.3364,0.44,-0.0104,-0.0104,-0.0126,-0.0193,-0.0127,-0.0193
+C5_dense_seul,Le vecteur sparse de BGE-M3 apporte-t-il quelque chose au dense ?,ECHEC,,,,,,,,,,,,,,
+C6_sans_voisins,L'expansion par chunks voisins améliore-t-elle la couverture ?,ECHEC,,,,,,,,,,,,,,

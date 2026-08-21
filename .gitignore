@@ -8,10 +8,14 @@ __pycache__/
 # Secrets
 .env
 
+
+#claude
+.claude/
 # Données et index
 data/documents/*
 data/vectordb/
 data/logs/
+evaluation/data
 !data/documents/.gitkeep
 
 # Wheels et gros binaires

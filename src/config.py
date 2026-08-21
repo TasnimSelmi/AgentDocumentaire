@@ -51,7 +51,7 @@ class Settings(BaseSettings):
 
     # --- Embeddings / reranking ---
     embedding_model: str = "BAAI/bge-m3"
-    embedding_device: Literal["cpu", "cuda"] = "cpu"
+    embedding_device: Literal["cpu", "cuda"] = "cuda"
     embedding_batch_size: int = 8
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     reranker_enabled: bool = True
@@ -131,9 +131,10 @@ class ConfigTables(BaseModel):
     conserver_entete: bool = True
     lignes_par_chunk: int = Field(default=12, ge=1)
     recouvrement_lignes: int = Field(default=2, ge=0)
+    lignes_min: int = Field(default=2, ge=1)
 
     @model_validator(mode="after")
-    def _recouvrement_lignes_coherent(self) -> ConfigTables:
+    def _recouvrement_lignes_coherent(self) -> "ConfigTables":
         if self.recouvrement_lignes >= self.lignes_par_chunk:
             raise ValueError(
                 "recouvrement_lignes doit être inférieur à lignes_par_chunk."
@@ -439,22 +440,97 @@ def _modele_depuis_champs(
     """
     Traduit une liste de champs YAML en classe Pydantic exécutable.
 
-    C'est le mécanisme central de la généricité : la classe produite sert
-    de schéma de function calling, forçant le LLM à respecter exactement
-    les champs et les types déclarés dans le YAML.
+    Les sorties du LLM sont légèrement normalisées avant validation :
+    - "" pour un champ optionnel -> None
+    - nombre reçu pour un champ texte -> str
+    - None / "" pour une liste optionnelle -> []
     """
+
     definitions: dict[str, tuple[Any, Any]] = {}
+
+    # Types déclarés dans le YAML, utilisés par le validator dynamique.
+    types_champs = {c.nom: c.type for c in champs}
+    obligatoires = {c.nom: c.obligatoire for c in champs}
+
     for c in champs:
         type_py = c.type_python()
+
         if c.obligatoire:
-            definitions[c.nom] = (type_py, Field(..., description=c.description))
+            definitions[c.nom] = (
+                type_py,
+                Field(..., description=c.description),
+            )
         else:
             definitions[c.nom] = (
                 type_py | None,
                 Field(default=None, description=c.description),
             )
 
-    modele = create_model(nom, **definitions)  # type: ignore[call-overload]
+    @model_validator(mode="before")
+    @classmethod
+    def _nettoyer_sortie_llm(cls, valeurs: Any) -> Any:
+        if not isinstance(valeurs, dict):
+            return valeurs
+
+        valeurs = dict(valeurs)
+
+        for champ, type_yaml in types_champs.items():
+            if champ not in valeurs:
+                continue
+
+            valeur = valeurs[champ]
+
+            # -----------------------------------------------------------
+            # Valeurs vides
+            # -----------------------------------------------------------
+            if valeur == "":
+                if type_yaml.startswith("liste["):
+                    valeurs[champ] = []
+                elif not obligatoires[champ]:
+                    valeurs[champ] = None
+
+                continue
+
+            # -----------------------------------------------------------
+            # Champs texte :
+            # le LLM peut renvoyer un nombre au lieu d'une chaîne.
+            # Exemple : reference = 1605.07683
+            # -----------------------------------------------------------
+            if type_yaml == "texte":
+                if valeur is not None and not isinstance(valeur, str):
+                    valeurs[champ] = str(valeur)
+
+                continue
+
+            # -----------------------------------------------------------
+            # Listes :
+            # None -> [] pour éviter des variations inutiles du LLM.
+            # -----------------------------------------------------------
+            if type_yaml.startswith("liste["):
+                if valeur is None:
+                    valeurs[champ] = []
+
+                continue
+
+            # -----------------------------------------------------------
+            # Dates :
+            # "" est déjà converti en None ci-dessus.
+            # Les vraies dates restent validées strictement par Pydantic.
+            # -----------------------------------------------------------
+            if type_yaml == "date":
+                if valeur is None:
+                    continue
+
+        return valeurs
+
+    modele = create_model(
+        nom,
+        __validators__={
+            "_nettoyer_sortie_llm": _nettoyer_sortie_llm,
+        },
+        **definitions,
+    )  # type: ignore[call-overload]
+
     modele.__doc__ = description or nom
     return modele
 

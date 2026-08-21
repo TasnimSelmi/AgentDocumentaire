@@ -1,0 +1,242 @@
+id,question,subset,answerable,expected_answer,expected_document,categorie,erreur,reponse,refus,exactitude,detail_exactitude,evidence_couverte,couverture_relative,rang_premier_utile,groundedness,contexte_suffisant,citations_valides,citations_reparees,citations_hors_perimetre,nombre_sources,documents_cites,perimetre_statut,duree_secondes
+paper_tab:2ddb51b03163d309434ee403fef42d6b9aecc458,what were the baselines?,paper_tab,True,"LF-MMI Attention
+Seq2Seq 
+RNN-T 
+Char E2E LF-MMI 
+Phone E2E LF-MMI 
+CTC + Gram-CTC",1904.03288.pdf,ECHEC_RETRIEVAL,,"Les ""baselines"" mentionnés dans les documents se réfèrent à des modèles ou méthodes de référence utilisés pour comparer les performances des systèmes de génération de titres ou de résumés. Voici les principales références identifiées :
+
+1. **Modèles de baselines pour la génération de titres** :  
+   - **NHG** (Natural Headline Generation) : Modèle de base utilisé comme référence pour évaluer la pertinence et l'attractivité des titres générés. [S1]  
+   - **Multitask** : Baseline basée sur un modèle multitâche, qui combine la synthèse et la transformation de style. [S1][S2]  
+   - **Gigaword-MASS** : Modèle entraîné sur un grand corpus, mais moins performant que NHG. [S1][S7]  
+   - **TitleStylist** : Modèle proposé dans les documents, comparé aux baselines pour tester son efficacité. [S1][S8]  
+
+2. **Modèles de baselines pour la récupération d'information** :  
+   - **TF-IDFMatch** : Méthode basée sur la similarité de mots pour évaluer les réponses. [S3]  
+   - **NearestNeighbor** : Approche utilisant les exemples les plus proches du corpus d'entraînement. [S3]  
+   - **Supervised Embeddings** : Modèles d'embedding supervisés pour scorer les paires (historique de conversation, réponse). [S3][S4]  
+
+3. **Baselines pour les tâches de dialogue** :  
+   - **Systèmes basés sur des règles** : Implémentés pour des tâches comme le suivi d'état de dialogue (T6), avec une précision de 40.7% sur les réponses validées. [S6]  
+   - **BiLSTM Attention** : Modèle de référence utilisant une architecture similaire à celle proposée, mais sans les composants de structure. [S5]  
+   - **Jurgens et al. (2018)** : Modèle étudié pour sa performance sur l'ensemble ACL-ARC, avec un F1 macro de 0.526. [S5]  
+
+Les baselines varient selon le contexte (génération de titres, récupération d'information, dialogue) et sont souvent comparées aux modèles proposés pour mesurer leur efficacité. Les contradictions entre les sources (ex. performance de Gigaword-MASS) sont explicitement signalées.",False,False,réponse attendue absente de la réponse produite,False,0.0,,0.0776,True,True,False,0,8,160507683|190401608|200401980,aucun,23.778
+paper_tab:53377f1c5eda961e438424d71d16150e669f7072,Which state-of-the-art model is surpassed by 9.68% attraction score?,paper_tab,True,pure summarization model NHG,2004.01980.pdf,ECHEC_GENERATION,,"Le modèle de pointe surpassé par une note d'attraction de 9,68 % est le **Neural Headline Generation (NHG)**. Selon le texte, le modèle proposé, intitulé **TitleStylist**, génère des titres avec une note d'attraction supérieure de 9,68 % par rapport au modèle de pointe actuel de synthèse (NHG), comme indiqué dans [S1]. Ce dernier est également mentionné comme une référence dans les comparaisons avec d'autres modèles comme le Gigaword-MASS et les baselines multitâche [S4].",False,False,réponse attendue absente de la réponse produite,True,0.7037,1.0,0.0857,True,True,False,0,2,200401980,aucun,7.474
+paper_tab:5a23f436a7e0c33e4842425cf86d5fd8ba78ac92,How big is dataset used?,paper_tab,True,"553,451 documents",2004.01878.pdf,ECHEC_RETRIEVAL,,"La taille du dataset utilisé est détaillée dans les sources suivantes :
+
+1. **Dataset des tâches 1 à 5** :  
+   - **Entraînement** : Chaque tâche partage une source de données commune avec 1 000 dialogues [S1].  
+   - **Validation** : 1 000 dialogues pour la tâche 1, 500 pour la tâche 2, 403 pour la tâche 3 [S1].  
+   - **Test** : 1 000 dialogues pour la tâche 1, 1 117 pour la tâche 2, 402 pour la tâche 3 [S1].  
+
+2. **Tâche 6** :  
+   - **Entraînement** : 54 dialogues [S1].  
+
+3. **Concierge** :  
+   - **Entraînement** : 8 dialogues [S1].  
+
+**Total estimé** : En combinant les dialogues d'entraînement, validation et test des tâches 1 à 5, le dataset principal comprend environ **5 000 dialogues d'entraînement**, **2 519 dialogues de test** et des dialogues de validation supplémentaires [S1].  
+
+Les sources mentionnent également d'autres datasets (ex. IMDB, Yelp) avec des tailles spécifiques, mais ces derniers ne sont pas liés directement à la question [S4][S9].",False,False,"valeurs trouvées : 1.0, 1.0, 5.0, 1000.0, 1000.0, 1500.0, 2403.0, 3.0 — attendu 553.0",False,0.0,,0.0755,True,True,False,0,3,160507683|180900530,aucun,15.635
+paper_tab:6aaf12505add25dd133c7b0dafe8f4fe966d1f1d,what previous RNN models do they compare with?,paper_tab,True,"Variational LSTM, CharCNN, Pointer Sentinel-LSTM, RHN, NAS Cell, SRU, QRNN, RAN, 4-layer skip-connection LSTM, AWD-LSTM, Quantized LSTM",1808.09029.pdf,ECHEC_RETRIEVAL,,"Les modèles RNN précédents comparés dans les documents incluent :  
+- **Kamper et al. [14]** et **Levin et al. [12]**, qui ont travaillé sur des embeddings acoustiques basés sur des réseaux de neurones convolutifs (CNNs) et des réseaux de neurones récurrents (RNNs) [S1].  
+- **Chen et al. [17]** et **Chungetal. [15]**, dont les approches ont été évoquées comme référence pour les embeddings acoustiques [S1].  
+- **Merity et al. (2018)**, un modèle d'état de l'art pour la modélisation linguistique, contre lequel le PRU (Pyramidal Recurrent Unit) a été comparé [S6].  
+- D'autres modèles RNN basés sur des mécanismes de portes et des transformations différentes, notamment des architectures comme les LSTM et les GRU [S4].  
+
+Ces comparaisons visent à évaluer l'amélioration des modèles proposés en termes de précision et de généralisation [S4].",False,False,réponse attendue absente de la réponse produite,False,0.5909,6.0,0.1786,True,True,False,0,3,161102550|180809029,aucun,7.177
+paper_tab:9176d2ba1c638cdec334971c4c7f1bb959495a8e,What are the source and target domains?,paper_tab,True,"Book, electronics, beauty, music, IMDB, Yelp, cell phone, baby, DVDs, kitchen",1809.00530.pdf,ECHEC_RETRIEVAL,,"La question porte sur l'identification des domaines source et cible. Selon les documents fournis :  
+
+- **Domaine source** : C'est le domaine d'où le modèle est entraîné. Par exemple, dans le contexte de la classification de sentiment croisée, le domaine source est celui où les données étiquetées sont disponibles, et le modèle apprend à classifier les sentiments à partir de ces données [S1].  
+- **Domaine cible** : C'est le domaine vers lequel le modèle doit généraliser ses connaissances. Il s'agit du domaine où les données ne sont pas étiquetées, et le modèle doit adapter ses performances en utilisant des techniques comme l'apprentissage semi-supervisé ou l'adaptation de domaine [S1].  
+
+Ces concepts sont explicitement mentionnés dans les extraits [S1], [S2] et [S3], qui décrivent le problème de transfert de connaissances entre domaines. Aucun autre document ne fournit d'information sur ces domaines.",False,False,réponse attendue absente de la réponse produite,False,0.3873,1.0,0.1132,True,True,False,0,3,180900530,aucun,8.007
+paper_tab:9349acbfce95cb5d6b4d09ac626b55a9cb90e55e,What are the citation intent labels in the datasets?,paper_tab,True,"Background, extends, uses, motivation, compare/contrast, and future work for the ACL-ARC dataset. Background, method, result comparison for the SciCite dataset.",1904.01608.pdf,ECHEC_GENERATION,,"Les étiquettes d'intention de citation (citation intent labels) présentes dans les jeux de données mentionnés sont les suivantes :  
+
+1. **BACKGROUND** :  
+   - Définition : Informations donnant plus de contexte sur un problème, concept, approche ou importance d'un sujet dans le domaine.  
+   - Exemple : ""Recent evidence suggests that co-occurring alexithymia may explain deficits [12]."" [S2]  
+
+2. **METHOD** :  
+   - Définition : Utilisation d'une méthode, outil, approche ou ensemble de données.  
+   - Exemple : ""We use Orthogonal Initialization (Saxe et al., 2014)"" [S2]  
+
+3. **RESULTCOMPARISON** :  
+   - Définition : Comparaison des résultats/observations d'un travail avec ceux d'autres travaux.  
+   - Exemple : ""Similar results to our study were reported in the study of Lee et al (2010)."" [S2]  
+
+Ces trois catégories sont explicitement identifiées comme les étiquettes principales dans le **SciCite dataset** [S2] et le **ACL-ARC dataset** [S1]. Les autres catégories mentionnées (comme *EXTENDS*, *USES*, *MOTIVATION*, etc.) sont soit des sous-catégories rares, soit des catégories non retenues comme étiquettes principales [S1].  
+
+Les annotations des données ont été effectuées en sélectionnant parmi ces trois options principales, avec une option *OTHER* temporaire pour les contextes incomplets (supprimée ultérieurement) [S4].",False,False,réponse attendue absente de la réponse produite,True,0.9375,1.0,0.1429,True,True,False,0,3,190401608,aucun,9.481
+paper_tab:9c4a4dfa7b0b977173e76e2d2f08fa984af86f0e,How does TP-N2F compare to LSTM-based Seq2Seq in terms of training and inference speed?,paper_tab,True,"Full Testing Set accuracy: 84.02
+Cleaned Testing Set accuracy: 93.48",1910.02339.pdf,ECHEC_GENERATION,,"La documentation fournie ne contient pas d'informations directes sur la comparaison des vitesses de formation (training) et d'inférence entre TP-N2F et les modèles Seq2Seq basés sur LSTM. Les données disponibles se concentrent principalement sur les performances en termes de précision des opérations (comme indiqué dans [S1]) et sur l'analyse des structures apprises par les modèles [S4], sans mentionner explicitement les métriques de vitesse. 
+
+Par exemple, [S1] compare les taux de précision d'exécution entre TP-N2F (55,95 %) et les modèles LSTM-based Seq2Seq (54,61 %), mais ces chiffres reflètent la qualité des résultats plutôt que la rapidité. De même, [S3] souligne que TP-N2F outpasse les modèles existants sur des ensembles de test, sans préciser les délais de traitement. 
+
+Ainsi, les documents consultés ne permettent pas de répondre directement à la question sur la vitesse de formation ou d'inférence.",False,False,réponse attendue absente de la réponse produite,True,0.7627,1.0,0.0615,True,True,False,0,3,191002339,aucun,8.062
+paper_tab:a02696d4ab728ddd591f84a352df9375faf7d1b4,How large is the Dialog State Tracking Dataset?,paper_tab,True,"1,618 training dialogs, 500 validation dialogs, and 1,117 test dialogs",1605.07683.pdf,ECHEC_RETRIEVAL,,"La taille du **Dialog State Tracking Dataset** (DSTC2) est indiquée dans les sources comme suit :  
+- **Entraînement** : 1 000 dialogues [S1].  
+- **Test** : 1 000 dialogues [S1].  
+
+Ces chiffres proviennent des données générées à partir du dataset original de DSTC2, converti dans le format des tâches étudiées [S3]. Le dataset **Concierge**, extrait d'un service en ligne, contient quant à lui 8 dialogues [S1], mais il s'agit d'un sous-ensemble distinct.  
+
+Ainsi, le **Dialog State Tracking Dataset** principal (DSTC2) comporte **1 000 dialogues d'entraînement** et **1 000 dialogues de test** [S1].",False,False,réponse attendue absente de la réponse produite,False,0.5366,1.0,0.0,True,True,False,0,2,160507683,aucun,10.228
+paper_tab:c17b609b0b090d7e8f99de1445be04f8f66367d4,What rouge score do they achieve?,paper_tab,True,"Best results on unigram:
+CNN/Daily Mail: Rogue F1 43.85
+NYT: Rogue Recall 49.02
+XSum: Rogue F1 38.81",1908.08345.pdf,ECHEC_RETRIEVAL,,"La question porte sur le score ROUGE atteint par un modèle. Selon les sources documentaires, les résultats ROUGE F1 sont présentés dans le tableau 2 du document [S1] et [S2]. Voici les valeurs clés :
+
+- **BERTSUMEXT(large)** : ROUGE-1 = 43.85, ROUGE-2 = 20.34, ROUGE-L = 39.90 [S1].
+- **TransformerABS** : ROUGE-1 = 40.21, ROUGE-2 = 17.76, ROUGE-L = 37.09 [S1].
+- **BERTSUMEXT** : ROUGE-1 = 43.25, ROUGE-2 = 20.24, ROUGE-L = 39.63 [S1].
+- **DCA** : ROUGE-1 = 41.69, ROUGE-2 = 19.47, ROUGE-L = 37.92 [S1].
+
+Le modèle **BERTSUMEXT(large)** obtient le meilleur score ROUGE-2 (20.34) et ROUGE-L (39.90) parmi les modèles listés. Ces résultats sont extraits des sources [S1] et [S2].",False,False,réponse attendue absente de la réponse produite,False,0.348,1.0,0.1702,True,True,False,0,2,190808345,aucun,13.137
+paper_text:1bdc990c7e948724ab04e70867675a334fdd3051,Where do they get the recipes from?,paper_text,True,from Food.com,1909.00105.pdf,ECHEC_RETRIEVAL,,"Les recettes sont générées à partir de préférences historiques des utilisateurs et de données provenant d'une base de données. Plus précisément :  
+- Les modèles utilisent les préférences des utilisateurs extraites de leurs recettes précédemment consommées pour créer des recettes personnalisées [S1].  
+- Les données sources incluent un ensemble de 270 000 recettes et 1,4 million d'interactions utilisateur-récepteur provenant du site Food.com, couvrant une période de 18 ans [S4].  
+- Les recettes générées s'appuient sur des spécifications incomplètes (nom de la recette, ingrédients clés, niveau calorique) et des représentations techniques des recettes historiques [S5].  
+
+Ces sources montrent que les recettes sont à la fois dérivées de données utilisateur et d'une base de données externe (Food.com).",False,False,réponse attendue absente de la réponse produite,False,0.6829,1.0,0.1064,True,True,False,0,3,190900105,aucun,7.67
+paper_text:4bdad5a20750c878d1a891ef255621f6172b6a79,How does discrete latent variable has an explicit semantic meaning to improve the CVAE on short-text conversation?,paper_text,True,"we connect each latent variable with a word in the vocabulary, thus each latent variable has an exact semantic meaning.",1911.09845.pdf,ECHEC_GENERATION,,"La mise en œuvre d'une variable latente discrète avec une signification sémantique explicite améliore le CVAE (Conditional Variational Autoencoder) dans le cadre des conversations à texte court en résolvant des limitations des approches basées sur des variables latentes continues. Voici comment cela fonctionne, selon les sources :
+
+1. **Problématique des variables latentes continues** :  
+   Les modèles CVAE traditionnels utilisent des variables latentes continues pour capturer des variations discursives, mais cela entraîne souvent des réponses générées ""plates"" et génériques. Cela s'explique par le fait que ces variables ne codent pas directement de sens sémantique, ce qui limite la diversité et la spécificité des réponses [S8]. Par exemple, les modèles optimisant la MLE (maximum likelihood estimation) favorisent naturellement les motifs fréquents des données d'entraînement, ce qui réduit la variabilité [S2].
+
+2. **Avantage des variables latentes discrètes** :  
+   Le modèle proposé introduit une variable latente discrète **connectée explicitement à un mot du vocabulaire**. Cela permet à chaque variable latente de porter une signification sémantique précise, ce qui guide la génération de réponses plus ciblées et variées. Par exemple, une variable latente pourrait représenter un ""acte de dialogue"" (comme une question ou une affirmation), ce qui structure le contenu de la réponse [S4]. Cette approche évite les problèmes de diversité des réponses observés dans les modèles continus [S8].
+
+3. **Méthode de sélection des variables** :  
+   Le modèle propose une **approche de sampling en deux étapes** pour explorer efficacement l'espace latent. La première étape sélectionne des variables discrètes avec un sens sémantique, tandis que la seconde étape génère des réponses en combinant ces variables avec la représentation du query. Cela permet de produire des réponses diverses tout en restant cohérentes avec le contexte [S2].
+
+4. **Résultats expérimentaux** :  
+   Les expériences montrent que ce modèle surpasse d'autres approches en termes de qualité des réponses, tant pour les évaluations automatiques que humaines. Les réponses générées sont plus **diverses et formatives**, grâce à la capacité des variables latentes discrètes à moduler le contenu sémantique [S2].
+
+**Contradictions ou limites** :  
+- Les sources ne mentionnent pas de conflits directes, mais elles soulignent que les méthodes antérieures (comme les GAN ou les réseaux de décodage modifiés) n'ont pas résolu pleinement le problème de la diversité des réponses [S2].  
+- Le modèle proposé se concentre sur le dialogue à un tour (single-turn), contrairement à certaines approches multi-tours [S4].
+
+En résumé, la variable latente discrète avec signification sémantique améliore le CVAE en structurant la génération de réponses via des mécanismes de contrôle sémantique, tout en évitant les biais des modèles continus [S2][S4][S8].",False,False,réponse attendue absente de la réponse produite,True,0.9143,1.0,0.0237,True,True,False,0,3,191109845,aucun,15.102
+paper_text:6a633811019e9323dc8549ad540550d27aa6d972,Is it valid to presume a bad medical wikipedia article should not contain much domain-specific jargon?,paper_text,True,No,1603.01987.pdf,ECHEC_RETRIEVAL,,"La question posée ne peut pas être répondue avec les informations fournies par les sources documentaires. Les extraits analysés [S1] à [S5] mettent en évidence l'importance des **caractéristiques spécifiques au domaine** (comme le vocabulaire médical ou les codes spécifiques) pour évaluer la qualité des articles médicaux sur Wikipedia. Cependant, aucun des textes ne traite explicitement de la **quantité de jargon domainique** dans un article ""mauvais"" ou de la corrélation entre la présence de jargon et la qualité de l'article. 
+
+Les sources s'attardent plutôt sur l'utilisation de ces caractéristiques pour améliorer la classification automatique et la fiabilité des informations, sans établir de lien direct entre la présence de jargon et la qualité de l'article. Par conséquent, **aucune affirmation factuelle ne peut être tirée** sur la validité de la présomption émise, car les documents ne contiennent pas de données suffisantes pour répondre à cette question spécifique. 
+
+**Référence :**  
+- [S1], [S3], [S5] (les autres sources ne traitent pas de la question du jargon dans le cadre de l'évaluation de la qualité des articles).",False,False,réponse attendue absente de la réponse produite,False,0.5821,1.0,0.0857,True,True,False,0,3,160301987,aucun,8.354
+paper_text:82c7d9e92c7d7b784de2cae87fb7293034c551f4,Are the grammar clauses manually created?,paper_text,True,Yes,1801.07804.pdf,ECHEC_GENERATION,,"La question de savoir si les clauses grammaticales sont manuellement créées n'est pas directement résolue par les sources fournies. Cependant, plusieurs éléments peuvent être analysés :
+
+1. **Manuel vs. Automatisé** :  
+   - Dans [S1], il est mentionné que les données d'entraînement ont été ""manuellement étiquetées"" [5-6, 28, 30], ce qui suggère une intervention humaine pour la labellisation des données, mais pas nécessairement pour la création des clauses grammaticales elles-mêmes.  
+   - Les clauses grammaticales utilisées dans le système (comme SVO, SVC, SVA, etc.) sont décrites comme étant déterminées par leur structure syntaxique (cf. [S3] et [S4]), ce qui implique une approche basée sur des règles linguistiques plutôt que sur une création manuelle.
+
+2. **Dépendance Syntaxique** :  
+   - Les clauses sont extraites via l'analyse de dépendance en utilisant des structures grammaticales prédéfinies (cf. [S4] et [S1]), ce qui indique une utilisation de modèles linguistiques standardisés plutôt qu'une création manuelle des clauses.
+
+3. **Contradictions ou Absences de Clarification** :  
+   - Aucune source ne précise explicitement si les clauses grammaticales sont manuellement créées. Les références à des ""clauses types"" (ex. SVO, SVC) semblent plutôt dériver de corpus linguistiques ou de structures syntaxiques standardisées (ex. CoNLL) [S4], sans indication de création manuelle.
+
+**Conclusion** :  
+Les sources ne fournissent pas de preuve directe que les clauses grammaticales soient manuellement créées. Elles suggèrent plutôt une approche basée sur des règles linguistiques et des structures syntaxiques prédéfinies, sans indication de création manuelle spécifique.  
+Réponse : Non, les clauses grammaticales ne sont pas explicitement mentionnées comme étant manuellement créées dans les sources. Elles sont plutôt associées à des méthodes d'analyse syntaxique et à des structures linguistiques standardisées [S1][S3][S4].",False,False,réponse attendue absente de la réponse produite,,,,0.0659,True,True,False,0,3,180107804,aucun,14.249
+paper_text:8cb9006bcbd2f390aadc6b70d54ee98c674e45cc,"How is the data collected, which web resources were used?",paper_text,True,"daily Kawish and Awami Awaz Sindhi newspapers, Wikipedia dumps, short stories and sports news from Wichaar social blog, news from Focus Word press blog, historical writings, novels, stories, books from Sindh Salamat literary website, novels, history and religious books from Sindhi Adabi Board,  tweets regarding news and sports are collected from twitter",1911.12579.pdf,ECHEC_RETRIEVAL,,"La collecte des données a été réalisée à partir de plusieurs ressources web, notamment :  
+- **Twitter** pour les tweets concernant les actualités et le sport [S1][S3].  
+- **Wikipedia dumps** (versions de 2018) pour les contenus historiques, littéraires et religieux [S1][S3].  
+- **Sites web spécifiques** comme *sindhsalamat.com* [S2], *sindhiadabiboard.org* [S3], et *wichaar.com* [S2].  
+- **Colonnes de presse** des journaux Sindhis tels que *Kawish* et *Awami Awaz*, extraits via le framework **Scrapy** [S1][S3].  
+- **Pages web de dépôts de données** comme *dumps.wikimedia.org* [S1][S2].  
+
+Les données ont été filtrées pour éliminer les éléments bruyants (balises HTML, caractères spéciaux, adresses emails) et normalisées via des outils de prétraitement [S1]. Les sources mentionnées incluent également des références à des projets comme **Gigaword** et **BookCorpus** pour des corpus de style [S5], mais ces derniers ne sont pas directement liés aux ressources web citées dans les extraits [S1][S2][S3].",False,False,réponse attendue absente de la réponse produite,False,0.5882,1.0,0.0882,True,True,False,0,4,191112579|200401980,aucun,11.042
+paper_text:9a8b9ea3176d30da2453cac6e9347737c729a538,what were their performance results?,paper_text,True,the hybrid NER model achieved a F1 score of $0.995$ on synthesized queries and $0.948$ on clinical notes while the i2b2 NER model achieved a F1 score of $0.441$ on synthesized queries and $0.927$ on clinical notes,1912.06262.pdf,ECHEC_RETRIEVAL,,"La question ""what were their performance results?"" est répondue à partir des documents fournis, en se concentrant sur les mesures de performance liées aux systèmes d'analyse et de traitement du langage naturel (NLP) :
+
+1. **Analyse des erreurs (WER)** :  
+   - Les résultats montrent une différence statistiquement significative entre les performances des hommes et des femmes. Pour les données d'évaluation, le taux d'erreur (WER) est de **42,9 % pour les femmes** et **34,3 % pour les hommes** [S2].  
+   - Les rôles des locuteurs influencent également les résultats : les locuteurs d'ancrage (Anchors) ont un WER moyen de **30,8 %**, tandis que les locuteurs ponctuels (Punctual) atteignent **42,23 %** [S2].  
+   - Les différences de WER entre les genres sont significatives (p-value < 0,001) [S2].
+
+2. **Performances du système vnOIE** :  
+   - Le système vnOIE obtient des taux de précision (precision) dans différentes catégories de phrases :  
+     - **92,78 %** pour les phrases simples,  
+     - **84,23 %** pour les phrases complexes,  
+     - **75,20 %** pour les phrases extrêmement complexes [S3].  
+   - L'analyse globale indique une précision moyenne de **83,71 %** [S3].
+
+3. **Résultats des modèles de traitement du langage** :  
+   - Les modèles comme **ClassifierLSTM** et **SiameseLSTM** obtiennent des taux d'exactitude (AP) de **0,616 ± 0,009** et **0,671 ± 0,011**, respectivement, surpassant les résultats antérieurs [S4].  
+   - Sur le dataset SciCite, le modèle **BiLSTM-Attn + ELMo + both scaffolds** atteint un **macroF1 de 84,0 %**, surpassant les performances précédentes [S6].
+
+Ces résultats sont extraits directement des documents consultés, sans hypothèse externe. Les contradictions ou lacunes dans les données ne sont pas mentionnées ici, car les sources ne contredisent pas les informations fournies.",False,False,réponse attendue absente de la réponse produite,False,0.0,,0.1062,True,True,False,0,4,161102550|180107804|190401608|190808717,aucun,13.187
+paper_text:a253749e3b4c4f340778235f640ce694642a4555,Which corpora does this paper analyse?,paper_text,True,"ESTER1, ESTER2, ETAPE, REPERE",1908.08717.pdf,ECHEC_RETRIEVAL,,"The paper analyzes the following corpora:  
+- **NYT (New York Times)**  
+- **CNN**  
+- **Humor**  
+- **Romance**  
+- **Clickbait**  
+
+These corpora are explicitly mentioned as source datasets and target style corpora in the experimental setup. For example, the NYT and CNN datasets are combined for training, while the Humor, Romance, and Clickbait corpora are used as target style datasets for style transfer tasks [S2]. Additionally, the paper references the use of Wikipedia dumps and other web resources for corpus acquisition, but these are not the primary corpora analyzed in the study [S3].  
+
+**Contradiction/Clarification**:  
+- The raw corpus for Sindhi word segmentation is mentioned in [S3], but this is unrelated to the corpora analyzed in the paper focused on style transfer.  
+- The TitleStylist model in [S5] uses the same target style corpora (Humor, Romance, Clickbait) for evaluation, confirming their role in the analysis.  
+
+**References**:  
+- [S2] (target style corpora: Humor, Romance, Clickbait; source datasets: NYT, CNN)  
+- [S5] (extension to multi-style tasks using the same corpora)",False,False,réponse attendue absente de la réponse produite,False,0.0,,0.1698,True,True,False,0,3,191112579|200401980,aucun,8.259
+paper_text:b91671715ad4fad56c67c28ce6f29e180fe08595,What other tasks do they test their method on?,paper_text,False,,1605.03481.pdf,FAUX_POSITIF,,"Les auteurs testent leur méthode sur plusieurs tâches, notamment :  
+- **T3** (affichage d'options) et **T4** (fourniture d'informations), qui nécessitent d'utiliser les résultats des appels API pour proposer des options triées ou fournir des informations supplémentaires [S1].  
+- **T5** (dialogues complets), qui combine toutes les compétences requises pour gérer un dialogue de réservation de restaurant [S6].  
+- **T6** (suivi d'état de dialogue 2), une tâche de suivi d'état de dialogue avec des dialogues réels [S2].  
+- Deux **ensembles de données supplémentaires extraits de interactions réelles avec des utilisateurs**, pour valider les résultats sur des données réelles [S6].  
+
+Ces tâches sont décrites dans le contexte de réservation de restaurants et testent des capacités comme la gestion de dialogue, la requête de bases de connaissances, et la gestion d'entités nouvelles [S6].",False,,,False,0.0,,0.0185,True,True,False,0,3,160507683,aucun,9.552
+paper_text:c59078efa7249acfb9043717237c96ae762c0a8c,which existing strategies are compared?,paper_text,True,"CDA, REG",1905.12801.pdf,ECHEC_RETRIEVAL,,"Les stratégies existantes comparées dans les sources documentaires sont principalement liées aux méthodes de réduction des biais dans les modèles de langage. Voici les stratégies mentionnées :
+
+1. **Stratégies de débiaisage par prétraitement des données** :  
+   Les travaux antérieurs se concentrent sur le débiaisage via le prétraitement des données (comme la déséquilibration des probabilités entre les mots masculins et féminins dans les embeddings) [S1], [S2].  
+
+2. **Stratégies de débiaisage des embeddings** :  
+   Des approches comme celle de Bolukbasi et al. (2016) et Bordia et Bowman (2019) sont citées comme méthodes existantes pour réduire les biais de genre dans les embeddings [S3], [S4].  
+
+3. **Stratégies basées sur la modification de la fonction de perte** :  
+   Les méthodes existantes incluent la modification de la fonction de perte pour égaliser les probabilités de prédiction des paires de mots genrés (comme ""he"" et ""she"") [S1], [S2].  
+
+4. **Stratégies combinées (débiaisage par données augmentées + modification de la perte)** :  
+   L'approche proposée compare ses résultats à des méthodes existantes combinant des techniques comme l'augmentation de données (counterfactual data augmentation) et des fonctions de perte spécifiques [S1], [S2].  
+
+5. **Modèles de référence (ex. BN, GR, Ppl. CB|o, CB|g, EB)** :  
+   Les tableaux mentionnent des modèles comme BN, GR, Ppl. CB|o, CB|g, EB, qui pourraient représenter des stratégies ou des configurations de modèles comparés [S5].  
+
+**Contradictions ou incertitudes** :  
+- Les sources ne précise pas explicitement les noms des stratégies comparées dans [S5], ce qui limite l'interprétation.  
+- Les références à des méthodes comme ""Luetal., 2018"" ou ""Zhaoetal., 2018"" [S1] indiquent des approches existantes, mais sans détails supplémentaires, leur nature exacte reste implicite.  
+
+**Conclusion** :  
+Les stratégies comparées sont principalement des méthodes de débiaisage des modèles de langage, notamment via le prétraitement des données, les embeddings, et la modification de la fonction de perte. Les modèles spécifiques mentionnés dans [S5] pourraient également être des stratégies de référence, mais leur description est insuffisante pour en préciser les détails.",False,False,réponse attendue absente de la réponse produite,False,0.4286,1.0,0.0792,True,True,False,0,5,190512801,aucun,16.014
+paper_text:d40662236eed26f17dd2a3a9052a4cee1482d7d6,How do they represent input features of their model to train embeddings?,paper_text,True,a vector of frame-level acoustic features,1611.02550.pdf,ECHEC_RETRIEVAL,,"Les auteurs représentent les caractéristiques d'entrée de leur modèle en utilisant des **features acoustiques** comme les **MFCCs (Mel-Frequency Cepstral Coefficients)**, accompagnés de leurs dérivées (∆ et ∆∆) [S5]. Ces caractéristiques sont traitées par des architectures de réseaux de neurones, notamment :  
+- **RNN (Récurrent Neural Network)** : Le modèle consiste en un RNN profond avec plusieurs couches empilées. Le vecteur d'état caché final est passé à des couches fully connected, et la sortie de la dernière couche devient l'embedding [S1][S4].  
+- **CNN (Convolutional Neural Network)** : Les auteurs utilisent des CNN avec 3 couches empilées et une probabilité de corruption de 0,5. Les features acoustiques sont également utilisées pour entraîner des embeddings via une perte contrastive [S2][S3].  
+
+Dans le cas des **Siamese networks**, les caractéristiques d'entrée incluent des **triplets (x_a, x_p, x_n)** pour l'apprentissage par contraste, avec des exemples de même classe (x_a et x_p) et un exemple de classe différente (x_n) [S5].  
+
+Les embeddings sont donc générés à partir de ces features acoustiques, traitées par des architectures RNN ou CNN, avec des couches fully connected ou des mécanismes de contraste pour distinguer les embeddings des mots [S1][S4][S5].",False,False,réponse attendue absente de la réponse produite,False,0.6531,1.0,0.1233,True,True,False,0,5,161102550|180900530,aucun,10.044
+paper_text:fbe5e513745d723aad711ceb91ce0c3c2ceb669e,What data/studies do the authors provide to support the assertion that the majority of aggressive conversations contain code-mixed languages?,paper_text,False,,2001.05493.pdf,FAUX_POSITIF,,"Les auteurs ne fournissent pas explicitement de données ou d'études statistiques quantifiant la proportion de conversations agressives contenant des langues mixtes (code-mixing). Cependant, ils mentionnent plusieurs éléments de contexte dans les sources :  
+
+1. **Référence au dataset TRAC-2018** :  
+   - Le texte indique que le dataset utilisé pour évaluer leur système est ""code-mixed"" :  
+     > *""the dataset provided by the organizers of TRAC-2018 [25,28] is actually a code-mixed dataset""* [S4].  
+   - Ce dataset est explicitement lié à l'analyse de conversations agressives, avec des exemples de code-mixing dans les annotations (ex. : *""Wellsaidsonu..youhavecouragetostand againstdadagiriofMuslims""* [S2]).  
+
+2. **Exemples de code-mixing dans les annotations** :  
+   - Les exemples de conversations agressives (OAG, CAG) incluent des mélanges de langues, comme dans l'exemple suivant :  
+     > *""Dear India, stop playing with the emotionsofyourpeopleforvotes""* [S2].  
+   - Ces exemples suggèrent que le code-mixing est un phénomène fréquent dans les données étudiées.  
+
+3. **Performance du système sur des données code-mixed** :  
+   - Les auteurs soulignent que leur système ""outperforms all previous approaches"" sur des datasets code-mixed, ce qui implique que ces données sont représentatives des conversations agressives [S2].  
+
+**Contradictions ou limites** :  
+- Aucune source ne fournit une statistique quantitative (ex. : ""majority"" de conversations agressives). La mention de ""majority"" dans l'abstract [S1] est donc basée sur l'analyse des données TRAC-2018, mais sans chiffres précis.  
+
+**Conclusion** :  
+Les auteurs s'appuient principalement sur le dataset TRAC-2018 (code-mixed) et ses annotations pour soutenir leur assertion, mais aucune étude ou statistique spécifique n'est citée pour quantifier la proportion de conversations agressives contenant des langues mixtes. [S1], [S2], [S4].",False,,,False,0.6765,1.0,0.0745,True,True,False,0,3,200105493,aucun,12.568

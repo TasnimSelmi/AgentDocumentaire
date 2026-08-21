@@ -1,4 +1,3 @@
-# Paramètres techniques, indépendants du domaine.
 
 decoupage:
   strategie: structure_aware
@@ -17,6 +16,7 @@ decoupage:
     conserver_entete: true
     lignes_par_chunk: 12
     recouvrement_lignes: 2
+    lignes_min: 2
 
   parent_child:
     actif: true
@@ -27,7 +27,6 @@ decoupage:
     rayon: 1
     max_chunks_ajoutes: 6
     taille_max_contexte: 12000
-
 ingestion:
   extensions_supportees:
     [".pdf", ".docx", ".txt", ".md", ".xlsx", ".csv", ".pptx", ".html"]

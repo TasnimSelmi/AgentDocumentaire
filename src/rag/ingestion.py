@@ -325,27 +325,37 @@ def _modele_analyse(profil: Profil) -> type[BaseModel]:
     """
     Assemble un schéma unique : catégorie + tous les champs de métadonnées.
 
-    Une seule requête LLM par document au lieu de deux. Sur 2000 documents,
-    cela divise par deux le coût et la durée.
+    Le modèle hérite du modèle dynamique de métadonnées afin de conserver
+    ses validators et sa logique de normalisation.
     """
     ModeleMeta = profil.modele_metadonnees()
     CategorieEnum = profil.classification.en_enum()
 
-    definitions: dict[str, Any] = {
-        "categorie": (
+    modele = create_model(
+        "AnalyseDocument",
+        __base__=ModeleMeta,
+        categorie=(
             CategorieEnum,
-            Field(..., description="Catégorie du document parmi la liste fournie."),
+            Field(
+                ...,
+                description="Catégorie du document parmi la liste fournie.",
+            ),
         ),
-        "confiance": (
+        confiance=(
             float,
-            Field(..., ge=0.0, le=1.0, description="Confiance dans la catégorie, entre 0 et 1."),
+            Field(
+                ...,
+                ge=0.0,
+                le=1.0,
+                description="Confiance dans la catégorie, entre 0 et 1.",
+            ),
         ),
-    }
-    for nom, info in ModeleMeta.model_fields.items():
-        definitions[nom] = (info.annotation, info)
+    )  # type: ignore[call-overload]
 
-    modele = create_model("AnalyseDocument", **definitions)  # type: ignore[call-overload]
-    modele.__doc__ = "Analyse structurée d'un document : catégorie et métadonnées."
+    modele.__doc__ = (
+        "Analyse structurée d'un document : catégorie et métadonnées."
+    )
+
     return modele
 
 
@@ -546,6 +556,7 @@ def _traiter_fichier(
     registre_entites: RegistreEntites,
     rapport: RapportIngestion,
     inferer: bool,
+    racine_documents: Path,
 ) -> list[ChunkIndexable]:
     """Traite un fichier et renvoie ses chunks prêts à indexer."""
 
@@ -588,7 +599,7 @@ def _traiter_fichier(
 
     # --- Payload commun à tous les chunks du document ---
     payload_commun: dict[str, Any] = {
-        "source": chemin.relative_to(get_settings().documents_dir).as_posix(),
+        "source": chemin.relative_to(racine_documents).as_posix(),
         "nom_fichier": chemin.name,
         "hash_contenu": empreinte,
         "signature_pipeline": signature_pipeline,
@@ -618,6 +629,7 @@ def ingerer(
     limite: int | None = None,
     inferer: bool = True,
     nom_profil: str | None = None,
+    dossier: Path | None = None,
 ) -> RapportIngestion:
     """
     Exécute le pipeline complet sur data/documents/.
@@ -630,6 +642,11 @@ def ingerer(
 
     debut = time.time()
     s = get_settings()
+    racine_documents = (
+        dossier.resolve()
+    if dossier is not None
+    else s.documents_dir.resolve()
+)
     tech = get_config_technique()
     profil = get_profil(nom_profil)
     signature_pipeline = calculer_signature_pipeline(profil, inferer)
@@ -654,7 +671,7 @@ def ingerer(
     # supprimés doit toujours comparer le registre au corpus complet, sinon
     # les documents hors limite seraient supprimés par erreur.
     tous_les_fichiers = decouvrir_fichiers(
-        s.documents_dir, tech.ingestion.extensions_supportees
+        racine_documents, tech.ingestion.extensions_supportees
     )
     rapport.fichiers_trouves = len(tous_les_fichiers)
 
@@ -686,7 +703,10 @@ def ingerer(
     )
 
     if not fichiers:
-        logger.warning("Aucun fichier exploitable dans %s", s.documents_dir)
+        logger.warning(
+    "Aucun fichier exploitable dans %s",
+    racine_documents,
+)
 
     # --- Suivi du remplissage des champs ---
     noms_champs = [c.nom for c in profil.champs_metadonnees]
@@ -705,11 +725,11 @@ def ingerer(
 
             ancien_doc_id = registre_fichiers.doc_id(chemin)
             nouveau_doc_id = identifiant_version_document(
-                chemin=chemin,
-                racine_documents=s.documents_dir,
-                empreinte=empreinte,
-                signature_pipeline=signature_pipeline,
-            )
+    chemin=chemin,
+    racine_documents=racine_documents,
+    empreinte=empreinte,
+    signature_pipeline=signature_pipeline,
+)
 
             # La nouvelle version est entièrement préparée avant toute
             # suppression. Si le chargement, le LLM ou l'embedding échoue,
@@ -720,6 +740,7 @@ def ingerer(
                 empreinte=empreinte,
                 signature_pipeline=signature_pipeline,
                 profil=profil,
+                racine_documents=racine_documents,
                 llm=llm,
                 registre_entites=registre_entites,
                 rapport=rapport,
@@ -791,7 +812,14 @@ def ingerer(
 # ===========================================================================
 
 def main() -> None:
+
     parseur = argparse.ArgumentParser(description="Ingestion documentaire")
+    parseur.add_argument(
+    "--dossier",
+    type=Path,
+    default=None,
+    help="dossier documentaire à ingérer (défaut : dossier configuré)",
+)
     parseur.add_argument("--reset", action="store_true", help="vide la collection et le registre")
     parseur.add_argument("--limit", type=int, default=None, help="n'ingérer que N fichiers")
     parseur.add_argument("--no-llm", action="store_true", help="sans inférence LLM (test rapide)")
@@ -810,7 +838,8 @@ def main() -> None:
             limite=args.limit,
             inferer=not args.no_llm,
             nom_profil=args.profil,
-        )
+            dossier=args.dossier,
+)
         rapport.afficher()
         print(f"  Collection : {info_collection()}")
         print(f"  Rapport    : {get_settings().logs_dir / 'rapport_ingestion.json'}\n")
