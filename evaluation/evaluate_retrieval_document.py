@@ -40,6 +40,7 @@ from typing import Any, Sequence
 from evaluation.common import (
     DOSSIER_RAPPORTS,
     Enregistrement,
+    attendre_client_qdrant,
     charger_enregistrements,
     cle_document,
     configurer_logs,
@@ -299,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(
         "Évaluation document-level sur %d question(s).", len(enregistrements)
     )
+
+    attendre_client_qdrant()
 
     try:
         resume, details = evaluer(

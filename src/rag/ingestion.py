@@ -344,7 +344,13 @@ def _modele_analyse(profil: Profil) -> type[BaseModel]:
         confiance=(
             float,
             Field(
-                ...,
+                # Optionnel : `analyser_document` lit déjà cette valeur avec
+                # `donnees.get("confiance", 1.0)`, en anticipant son absence.
+                # La rendre obligatoire ici contredisait ce fallback et
+                # rejetait le document entier — catégorie comprise — quand le
+                # LLM omettait ce seul champ, ce qui s'est produit sur 6 des
+                # 21 échecs d'ingestion observés.
+                default=1.0,
                 ge=0.0,
                 le=1.0,
                 description="Confiance dans la catégorie, entre 0 et 1.",

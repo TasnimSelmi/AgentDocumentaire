@@ -18,7 +18,6 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.profiling import DomainProfile
-from src.tools.base import nettoyer_reflexion
 
 
 def texte_message(reponse: Any) -> str:
@@ -26,7 +25,13 @@ def texte_message(reponse: Any) -> str:
     Extrait le texte d'une réponse LangChain quel que soit le provider.
 
     Les éventuels blocs <think> sont retirés avant réutilisation.
+
+    Import de `nettoyer_reflexion` local et paresseux : au niveau module, il
+    ferme un cycle (src.llm.common -> src.tools.base -> src.tools.__init__
+    -> src.tools.classify -> src.llm.common, encore en cours d'initialisation).
     """
+    from src.tools.base import nettoyer_reflexion
+
     contenu = getattr(reponse, "content", reponse)
 
     if isinstance(contenu, str):
@@ -107,6 +112,8 @@ def extraire_json_objet(texte: str) -> dict[str, Any]:
         {...}
         ```
     """
+    from src.tools.base import nettoyer_reflexion
+
     texte = nettoyer_reflexion(texte).strip()
 
     texte = re.sub(

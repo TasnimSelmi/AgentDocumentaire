@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -52,23 +53,128 @@ from typing import Any, Sequence
 from evaluation.common import (
     DOSSIER_RAPPORTS,
     Enregistrement,
+    attendre_client_qdrant,
     charger_enregistrements,
     charger_textes_par_document,
     cle_document,
     configurer_logs,
     ecrire_rapport,
+    ensemble_jetons,
     horodatage,
+    jetons,
     mesurer_couverture,
     moyenne,
 )
-from evaluation.evaluate_generation import a_refuse, calculer_groundedness
-from src.rag.generation import generer_reponse
+from src.rag.generation import ReponseRAG, generer_reponse
 from src.rag.vectorstore import fermer_client
 from test_rag import TOLERANCE_RELATIVE, comparer_reponse
 
 logger = logging.getLogger("evaluation.end_to_end")
 
 SEUIL_COUVERTURE = 0.70
+
+# Mots outils les plus fréquents en anglais et en français. Ils ne prouvent
+# rien sur l'ancrage documentaire : les retenir gonflerait la groundedness
+# de toute réponse grammaticalement correcte.
+_MOTS_OUTILS = {
+    "the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or", "is",
+    "are", "was", "were", "be", "been", "it", "its", "this", "that", "these",
+    "with", "by", "as", "from", "not", "no", "we", "they", "their", "there",
+    "le", "la", "les", "un", "une", "des", "du", "de", "et", "ou", "est",
+    "sont", "dans", "pour", "par", "sur", "au", "aux", "ce", "cette", "ces",
+    "il", "elle", "ils", "elles", "que", "qui", "ne", "pas", "plus",
+}
+
+_NOMBRE = re.compile(r"^\d+([.,]\d+)?$")
+
+
+def jetons_porteurs(texte: str) -> set[str]:
+    """
+    Jetons dont la présence dans le contexte est réellement informative.
+
+    Retient les nombres (toujours) et les mots hors liste d'outils de plus de
+    trois caractères. Cette liste est linguistique, jamais métier : elle ne
+    contient aucun terme de finance, d'ESG ou du benchmark.
+    """
+    retenus: set[str] = set()
+    for jeton in jetons(texte):
+        if _NOMBRE.match(jeton):
+            retenus.add(jeton)
+        elif len(jeton) > 3 and jeton not in _MOTS_OUTILS:
+            retenus.add(jeton)
+    return retenus
+
+
+def calculer_groundedness(reponse: ReponseRAG) -> float:
+    """
+    Part des jetons porteurs de la réponse présents dans le contexte cité.
+
+    Le contexte est reconstitué depuis `ReponseRAG.sources`, c'est-à-dire ce
+    que le pipeline a effectivement présenté au modèle, et non l'ensemble des
+    passages candidats.
+    """
+    porteurs = jetons_porteurs(reponse.reponse)
+    if not porteurs:
+        return 1.0  # Réponse sans contenu factuel : rien à ancrer.
+
+    contexte: set[str] = set()
+    for source in reponse.sources:
+        contexte |= ensemble_jetons(source.extrait)
+
+    if not contexte:
+        return 0.0
+
+    return len(porteurs & contexte) / len(porteurs)
+
+
+def a_refuse(reponse: ReponseRAG) -> bool:
+    """
+    Détecte un refus sans recourir à une liste de formules.
+
+    Le pipeline court-circuite le LLM quand le contexte est insuffisant : le
+    refus se lit donc dans l'état de l'objet, pas dans le texte. C'est plus
+    robuste qu'un appariement de chaînes, qui casserait au moindre
+    changement de formulation ou de langue de sortie.
+    """
+    return (not reponse.contexte_suffisant) or (not reponse.sources)
+
+
+def juger_avec_llm(reponse: ReponseRAG, llm: Any) -> tuple[float | None, str]:
+    """
+    Juge LLM optionnel : la réponse est-elle soutenue par le contexte ?
+
+    Non déterministe, donc explicitement hors des métriques par défaut.
+    Réutilise le LLM du projet pour ne pas introduire de dépendance.
+    """
+    if not reponse.sources:
+        return None, "aucune source"
+
+    contexte = "\n\n".join(
+        f"[{source.citation}] {source.extrait}" for source in reponse.sources
+    )
+    systeme = (
+        "Tu évalues si une réponse est entièrement soutenue par un contexte.\n"
+        "Réponds uniquement par un entier de 0 à 100, sans aucun autre texte.\n"
+        "100 = chaque affirmation est soutenue par le contexte.\n"
+        "0 = la réponse contredit le contexte ou l'invente."
+    )
+    utilisateur = (
+        f"CONTEXTE :\n{contexte}\n\n"
+        f"QUESTION :\n{reponse.question}\n\n"
+        f"RÉPONSE :\n{reponse.reponse}\n\n"
+        "Score :"
+    )
+
+    try:
+        from src.llm.common import invoquer_llm
+
+        brut = invoquer_llm(llm, systeme=systeme, utilisateur=utilisateur)
+        trouve = re.search(r"\d{1,3}", str(brut))
+        if not trouve:
+            return None, f"score illisible : {str(brut)[:60]}"
+        return min(100, int(trouve.group())) / 100.0, ""
+    except Exception as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
 
 # Catégories exhaustives et mutuellement exclusives.
 SUCCES = "SUCCES"
@@ -133,11 +239,19 @@ def evaluer(
     *,
     tolerance: float = TOLERANCE_RELATIVE,
     seuil_couverture: float = SEUIL_COUVERTURE,
+    llm_judge: bool = False,
     **options_pipeline: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Exécute la chaîne complète et classifie chaque cas."""
     logger.info("Lecture du corpus indexé pour le calcul des plafonds…")
     textes_par_document = charger_textes_par_document()
+
+    llm = None
+    if llm_judge:
+        from src.llm.factory import construire_llm
+
+        llm = construire_llm()
+        logger.info("Juge LLM activé (métrique non déterministe).")
 
     details: list[dict[str, Any]] = []
 
@@ -211,6 +325,15 @@ def evaluer(
             citations_valides=reponse.citations_valides,
         )
 
+        documents_cites = sorted(
+            {cle_document(s.nom_fichier or s.source) for s in reponse.sources}
+        )
+        bon_document_cite = (
+            cle_document(enregistrement.expected_document or "") in documents_cites
+            if enregistrement.expected_document
+            else None
+        )
+
         ligne.update(
             {
                 "categorie": categorie,
@@ -228,20 +351,20 @@ def evaluer(
                 "citations_reparees": reponse.citations_reparees,
                 "citations_hors_perimetre": len(reponse.citations_hors_perimetre),
                 "nombre_sources": len(reponse.sources),
-                "documents_cites": "|".join(
-                    sorted(
-                        {
-                            cle_document(s.nom_fichier or s.source)
-                            for s in reponse.sources
-                        }
-                    )
-                ),
+                "documents_cites": "|".join(documents_cites),
+                "bon_document_cite": bon_document_cite,
                 "perimetre_statut": (
                     reponse.perimetre.statut if reponse.perimetre else ""
                 ),
                 "duree_secondes": round(reponse.duree_secondes, 3),
             }
         )
+
+        if llm_judge:
+            score, motif = juger_avec_llm(reponse, llm)
+            ligne["fidelite_llm"] = score
+            ligne["fidelite_llm_motif"] = motif
+
         details.append(ligne)
 
         if index % 10 == 0:
@@ -286,6 +409,60 @@ def evaluer(
         moyenne([l["duree_secondes"] for l in evalues]), 2
     )
 
+    # --- Citations : correction des sources citées, sur les cas où une
+    # comparaison a du sens (document attendu connu, au moins une citation).
+    avec_document_attendu = [
+        l for l in evalues if l.get("bon_document_cite") is not None
+    ]
+    resume["citation_correcte"] = (
+        round(
+            sum(1 for l in avec_document_attendu if l["bon_document_cite"])
+            / len(avec_document_attendu),
+            4,
+        )
+        if avec_document_attendu
+        else None
+    )
+    avec_sources = [l for l in evalues if l.get("nombre_sources")]
+    resume["citations_reparees_taux"] = (
+        round(
+            sum(1 for l in avec_sources if l["citations_reparees"]) / len(avec_sources),
+            4,
+        )
+        if avec_sources
+        else 0.0
+    )
+
+    if llm_judge:
+        scores = [l["fidelite_llm"] for l in evalues if l.get("fidelite_llm") is not None]
+        resume["fidelite_llm_moyenne"] = round(moyenne(scores), 4)
+        resume["fidelite_llm_evaluees"] = len(scores)
+
+    # --- Unanswerable : le système doit refuser, jamais halluciner.
+    non_repondables = [l for l in evalues if not l["answerable"]]
+    total_unanswerable = len(non_repondables)
+    refus_corrects = sum(1 for l in non_repondables if l["categorie"] == REFUS_CORRECT)
+    hallucinations = sum(1 for l in non_repondables if l["categorie"] == FAUX_POSITIF)
+    resume["total_unanswerable"] = total_unanswerable
+    resume["refus_corrects"] = refus_corrects
+    resume["hallucinations"] = hallucinations
+    resume["correct_refusal_rate"] = (
+        round(refus_corrects / total_unanswerable, 4) if total_unanswerable else 0.0
+    )
+    resume["hallucination_rate"] = (
+        round(hallucinations / total_unanswerable, 4) if total_unanswerable else 0.0
+    )
+
+    # --- Answerable : un refus est ici une erreur (faux refus), pas une vertu.
+    repondables = [l for l in evalues if l["answerable"]]
+    total_answerable = len(repondables)
+    false_refusals = sum(1 for l in repondables if l["categorie"] == REFUS_INCORRECT)
+    resume["total_answerable"] = total_answerable
+    resume["false_refusals"] = false_refusals
+    resume["false_refusal_rate"] = (
+        round(false_refusals / total_answerable, 4) if total_answerable else 0.0
+    )
+
     return resume, details
 
 
@@ -311,6 +488,11 @@ def construire_parseur() -> argparse.ArgumentParser:
     parseur.add_argument(
         "--seuil-couverture", type=float, default=SEUIL_COUVERTURE
     )
+    parseur.add_argument(
+        "--llm-judge",
+        action="store_true",
+        help="active le juge LLM (non déterministe, hors métriques de base)",
+    )
     parseur.add_argument("--verbose", action="store_true")
     return parseur
 
@@ -328,11 +510,14 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("Évaluation end-to-end sur %d question(s).", len(enregistrements))
 
+    attendre_client_qdrant()
+
     try:
         resume, details = evaluer(
             enregistrements,
             tolerance=arguments.tolerance,
             seuil_couverture=arguments.seuil_couverture,
+            llm_judge=arguments.llm_judge,
             top_k=arguments.top_k,
             limite_candidats=arguments.candidats,
             utiliser_reranker=not arguments.sans_reranker,
@@ -362,6 +547,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Taux de succès          : {resume['taux_succes']:.1%}")
     print(f"  Échecs dus au retrieval : {resume['part_echecs_retrieval']:.1%}")
     print(f"  Échecs dus au LLM       : {resume['part_echecs_generation']:.1%}")
+    print()
+    print(
+        f"  Unanswerable ({resume['total_unanswerable']:>3d}) : "
+        f"refus correct {resume['correct_refusal_rate']:.1%}  |  "
+        f"hallucination {resume['hallucination_rate']:.1%}"
+    )
+    print(
+        f"  Answerable   ({resume['total_answerable']:>3d}) : "
+        f"faux refus {resume['false_refusal_rate']:.1%}"
+    )
     print()
     if resume["repartition"][CORRECT_SANS_EVIDENCE]:
         print(
