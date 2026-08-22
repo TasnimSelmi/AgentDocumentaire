@@ -30,6 +30,7 @@ import os
 import random
 import re
 import sys
+import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -554,6 +555,58 @@ def horodatage() -> str:
 # ===========================================================================
 
 
+def attendre_client_qdrant(
+    tentatives: int = 15,
+    delai_secondes: float = 2.0,
+) -> None:
+    """
+    Acquiert le client Qdrant du projet, avec de nouvelles tentatives en cas
+    de verrou transitoire.
+
+    En mode local, Qdrant pose un verrou fichier exclusif (voir
+    `src.rag.vectorstore.get_client`) : un seul processus à la fois. Si un
+    run d'évaluation démarre pendant qu'un autre processus (une session
+    interactive, un run précédent pas encore terminé) tient encore ce
+    verrou, `RuntimeError("... already accessed by another instance ...")`
+    est levée.
+
+    Sans cette attente, chaque question posée avant la libération du verrou
+    échoue individuellement et est comptée comme une erreur de retrieval —
+    ce qui a déjà corrompu un run (15 erreurs consécutives, toutes en tête
+    de rapport, le temps que l'autre processus se termine). Cette fonction
+    absorbe cette attente UNE fois, avant la boucle chronométrée, plutôt que
+    de la laisser polluer les métriques question par question.
+
+    Une contention qui persiste au-delà de `tentatives` est une vraie panne
+    externe (processus bloqué, deadlock) : elle est alors relevée telle
+    quelle, sans être masquée.
+    """
+    from src.rag.vectorstore import get_client
+
+    derniere_erreur: Exception | None = None
+    for tentative in range(1, tentatives + 1):
+        try:
+            get_client()
+            return
+        except RuntimeError as exc:
+            derniere_erreur = exc
+            if "already accessed" not in str(exc):
+                raise
+            logger.warning(
+                "Verrou Qdrant local occupé (tentative %d/%d) : %s",
+                tentative,
+                tentatives,
+                exc,
+            )
+            time.sleep(delai_secondes)
+
+    raise RuntimeError(
+        f"Verrou Qdrant local toujours occupé après {tentatives} tentatives "
+        f"({tentatives * delai_secondes:.0f}s). Un autre processus retient "
+        "le stockage local — ferme-le avant de relancer l'évaluation."
+    ) from derniere_erreur
+
+
 def charger_textes_par_document(
     limite_chunks: int = 100_000,
 ) -> dict[str, list[str]]:
@@ -628,5 +681,6 @@ __all__ = [
     "percentile",
     "ecrire_rapport",
     "horodatage",
+    "attendre_client_qdrant",
     "charger_textes_par_document",
 ]

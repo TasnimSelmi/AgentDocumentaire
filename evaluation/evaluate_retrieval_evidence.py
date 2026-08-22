@@ -55,6 +55,7 @@ from typing import Any, Sequence
 from evaluation.common import (
     DOSSIER_RAPPORTS,
     Enregistrement,
+    attendre_client_qdrant,
     charger_enregistrements,
     charger_textes_par_document,
     cle_document,
@@ -160,6 +161,9 @@ def evaluer(
                 "erreur": "",
                 "passages_total": len(rapport.passages),
                 "passages_du_document": len(passages_du_document),
+                # Le document attendu a-t-il été retrouvé par le retrieval,
+                # indépendamment de la couverture d'evidence qu'il apporte ?
+                "document_retrouve": bool(passages_du_document),
                 "pages_recuperees": "|".join(str(p) for p in pages),
                 "page_gold_atteinte": page_gold_atteinte,
                 "couverture_suffisante": couverture.couverture_relative
@@ -180,6 +184,14 @@ def evaluer(
     plafonds = [l["plafond"] for l in mesurables]
     atteints = [l["atteint"] for l in mesurables]
     relatives = [l["couverture_relative"] for l in mesurables]
+    # Sous-ensemble où le document attendu a été retrouvé par le retrieval.
+    # Sur le reste, atteint vaut mécaniquement 0 : les mélanger aux couvertures
+    # ci-dessus confond « le document n'a pas été retrouvé » (échec de
+    # retrieval document-level) et « le document a été retrouvé mais
+    # l'evidence n'y est pas bien couverte » (échec de retrieval evidence-level).
+    retrouves = [l for l in mesurables if l.get("document_retrouve")]
+    atteints_conditionnes = [l["atteint"] for l in retrouves]
+    relatives_conditionnees = [l["couverture_relative"] for l in retrouves]
     rangs = [
         l["rang_premier_utile"]
         for l in mesurables
@@ -213,10 +225,11 @@ def evaluer(
             else 0.0,
             4,
         ),
-        # --- Retrieval brut
+        # --- Retrieval brut, GLOBAL (toutes les questions mesurables, y
+        # compris celles où le document attendu n'a même pas été retrouvé)
         "atteint_moyen": round(moyenne(atteints), 4),
         "atteint_median": round(percentile(atteints, 0.5), 4),
-        # --- LA métrique
+        # --- LA métrique, GLOBALE
         "couverture_relative_moyenne": round(moyenne(relatives), 4),
         "couverture_relative_mediane": round(percentile(relatives, 0.5), 4),
         "part_couverture_suffisante": round(
@@ -225,6 +238,24 @@ def evaluer(
             if mesurables
             else 0.0,
             4,
+        ),
+        # --- Document attendu retrouvé par le retrieval (au moins un passage
+        # du document attendu figure dans les passages récupérés)
+        "documents_attendus_retrouves": len(retrouves),
+        "taux_documents_retrouves": round(
+            len(retrouves) / len(mesurables) if mesurables else 0.0, 4
+        ),
+        # --- Couverture CONDITIONNÉE au fait que le document ait été
+        # retrouvé : neutralise les échecs de retrieval document-level pour
+        # isoler la qualité de couverture de l'evidence une fois le bon
+        # document en main. Calculée réellement sur le sous-ensemble
+        # `retrouves`, jamais estimée.
+        "atteint_conditionne_moyen": round(moyenne(atteints_conditionnes), 4),
+        "couverture_relative_conditionnee_moyenne": round(
+            moyenne(relatives_conditionnees), 4
+        ),
+        "couverture_relative_conditionnee_mediane": round(
+            percentile(relatives_conditionnees, 0.5), 4
         ),
         # --- Chunking et rang
         "rang_premier_utile_moyen": round(moyenne(rangs), 2),
@@ -302,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
         "Évaluation evidence-level sur %d question(s).", len(enregistrements)
     )
 
+    attendre_client_qdrant()
+
     try:
         resume, details = evaluer(
             enregistrements,
@@ -331,6 +364,15 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"    dont >= {resume['seuil_couverture']:.2f}          : "
         f"{resume['part_couverture_suffisante']:.1%}"
+    )
+    print(
+        f"  Document retrouvé         : "
+        f"{resume['taux_documents_retrouves']:.1%} "
+        f"({resume['documents_attendus_retrouves']}/{resume['mesurables']})"
+    )
+    print(
+        f"  Couverture relative | doc retrouvé : "
+        f"{resume['couverture_relative_conditionnee_moyenne']:.4f}"
     )
     print(f"  Rang 1er passage utile    : {resume['rang_premier_utile_median']}")
     print(f"  Passages pour 80% plafond : {resume['passages_pour_80pct_moyen']}")

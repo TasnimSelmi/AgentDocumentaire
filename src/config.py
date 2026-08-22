@@ -514,12 +514,25 @@ def _modele_depuis_champs(
 
             # -----------------------------------------------------------
             # Dates :
-            # "" est déjà converti en None ci-dessus.
-            # Les vraies dates restent validées strictement par Pydantic.
+            # "" est déjà converti en None ci-dessus. Une date syntaxiquement
+            # invalide (ex. "2016-09-00", jour inconnu recopié tel quel par
+            # le LLM depuis une citation qui ne précise que le mois) ne doit
+            # pas faire échouer tout le document sur un champ optionnel :
+            # Pydantic la validerait strictement et lèverait, ce qui
+            # remontait jusqu'à l'ingestion et écartait des documents par
+            # ailleurs exploitables. Elle est neutralisée en None, exactement
+            # comme "" ci-dessus. Un champ de date obligatoire, lui, doit
+            # continuer à échouer : on ne le neutralise pas.
             # -----------------------------------------------------------
             if type_yaml == "date":
                 if valeur is None:
                     continue
+                if isinstance(valeur, str):
+                    try:
+                        dt.date.fromisoformat(valeur)
+                    except ValueError:
+                        if not obligatoires[champ]:
+                            valeurs[champ] = None
 
         return valeurs
 

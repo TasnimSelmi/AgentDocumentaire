@@ -300,7 +300,12 @@ def comparer_reponse(
     reponse_normalisee = _normaliser(reponse)
     if not attendu_normalise:
         return False, "vérité terrain vide après normalisation"
-    if attendu_normalise in reponse_normalisee:
+    # Comparaison sur mots entiers, jamais sur sous-chaîne brute : un attendu
+    # court comme "No" matcherait sinon n'importe quel mot qui le contient
+    # ("nommees", "know", "annotation"...), sans rapport avec la question.
+    # `_normaliser` joint les jetons par un unique espace : les entourer d'un
+    # espace avant de comparer force la frontière de mot des deux côtés.
+    if f" {attendu_normalise} " in f" {reponse_normalisee} ":
         return True, "réponse attendue présente dans la réponse produite"
     return False, "réponse attendue absente de la réponse produite"
 
