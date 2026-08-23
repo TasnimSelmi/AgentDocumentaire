@@ -16,15 +16,15 @@ Exemples
 --------
     # Smoke test
     python -m evaluation.evaluate_retrieval_document \\
-        --questions evaluation/data/uda_400.jsonl --limite 20
+        --questions evaluation/data/finance_esg.jsonl --limite 20
 
     # Run complet
     python -m evaluation.evaluate_retrieval_document \\
-        --questions evaluation/data/uda_400.jsonl --nom baseline
+        --questions evaluation/data/finance_esg.jsonl --nom baseline
 
     # Sans résolution documentaire (recherche purement sémantique)
     python -m evaluation.evaluate_retrieval_document \\
-        --questions evaluation/data/uda_400.jsonl \\
+        --questions evaluation/data/finance_esg.jsonl \\
         --sans-resolution-document --nom sans_resolution
 """
 

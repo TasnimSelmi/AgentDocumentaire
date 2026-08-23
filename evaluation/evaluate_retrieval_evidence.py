@@ -41,7 +41,7 @@ Métriques complémentaires
 Exemple
 -------
     python -m evaluation.evaluate_retrieval_evidence \\
-        --questions evaluation/data/uda_400.jsonl --nom baseline
+        --questions evaluation/data/finance_esg.jsonl --nom baseline
 """
 
 from __future__ import annotations

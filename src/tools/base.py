@@ -242,6 +242,15 @@ class ContexteOutil:
     sources: list[SourceOutil] = field(default_factory=list)
     resultats: list[ResultatOutil] = field(default_factory=list)
 
+    # `RapportRecherche` (src.rag.retrieval) du dernier appel réussi à
+    # l'outil `search`, conservé tel quel (pas aplati en `SourceOutil`) afin
+    # que la génération puisse être appelée directement depuis ces mêmes
+    # preuves plutôt que de relancer sa propre recherche. Typé `Any` ici
+    # pour que ce module générique n'importe pas `src.rag` : c'est
+    # `src/tools/search.py`, qui dépend déjà de `src.rag.retrieval`, qui
+    # écrit ce champ.
+    dernier_rapport_recherche: Any | None = None
+
     def ajouter_resultat(self, resultat: ResultatOutil) -> None:
         """Conserve un résultat et agrège ses sources sans doublons."""
         self.resultats.append(resultat)
@@ -285,6 +294,7 @@ class ContexteOutil:
         """Réinitialise les données transitoires de la requête."""
         self.sources.clear()
         self.resultats.clear()
+        self.dernier_rapport_recherche = None
 
     def bloc_domaine(self) -> str:
         """Contexte métier optionnel destiné aux outils LLM."""

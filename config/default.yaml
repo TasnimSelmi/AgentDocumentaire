@@ -71,7 +71,7 @@ recherche:
   score_min: 0.30
 
 qdrant:
-  nom_collection: documents
+  nom_collection: financial_reports
   distance: cosine
   taille_vecteur_dense: 1024 # BGE-M3
   sparse_active: true

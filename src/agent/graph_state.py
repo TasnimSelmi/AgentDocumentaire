@@ -28,15 +28,34 @@ class EtatGraphe:
     `reponse` reste `None` tant que `generer_reponse` n'a pas été atteint —
     c'est-à-dire tant que la boucle rechercher/reformuler continue.
 
-    `preuves_suffisantes` porte la décision calculée par `noeud_evaluer_preuves`
-    (fondée sur les scores de pertinence, voir `nodes.SEUIL_PERTINENCE_MINIMALE`)
-    et lue telle quelle par `router_apres_evaluation`, pour que le routage ne
-    puisse jamais diverger du jugement déjà journalisé dans la trace.
+    Deux jugements distincts, calculés par `noeud_evaluer_preuves` et lus
+    tels quels par `router_apres_evaluation` (le routage ne doit jamais
+    diverger du jugement déjà journalisé dans la trace) :
+
+        preuves_pertinentes  Niveau 1 — le meilleur passage récupéré
+            dépasse-t-il `nodes.SEUIL_PERTINENCE_MINIMALE` (score de
+            reranking) ? Déterministe, sans appel LLM.
+
+        preuves_suffisantes  Niveau 2 — ces passages, déjà jugés
+            pertinents, contiennent-ils réellement l'information demandée ?
+            Jugement LLM borné (voir `nodes._juger_suffisance`). Reste à
+            `None` tant que le niveau 1 n'est pas franchi : un passage non
+            pertinent n'est jamais soumis à ce jugement.
+
+    Une réponse n'est générée par le LLM que si les deux valent `True`.
+    `raison_insuffisance` porte le motif du niveau 2 lorsqu'il échoue, pour
+    la reformulation et pour le message de refus. `stagnation` signale que
+    la reformulation n'a pas fait bouger le score de pertinence d'une
+    tentative à l'autre : l'agent peut alors s'arrêter avant
+    `max_tentatives` plutôt que de consommer tout le budget pour rien.
     """
 
     session: SessionAgent
     reponse: Any | None = None
+    preuves_pertinentes: bool | None = None
     preuves_suffisantes: bool | None = None
+    raison_insuffisance: str | None = None
+    stagnation: bool = False
 
 
 __all__ = ["EtatGraphe"]

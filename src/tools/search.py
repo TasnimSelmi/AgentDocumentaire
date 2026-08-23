@@ -316,6 +316,14 @@ def _executer_search(
             f"Recherche impossible : {exc}",
         )
 
+    # Conservé tel quel (pas seulement les SourceOutil aplaties) pour que
+    # l'agent puisse générer la réponse depuis ce même rapport, sans
+    # relancer une seconde recherche indépendante. Écrit sur les deux
+    # chemins (vide ou non) : un rapport vide reste informatif (périmètre,
+    # motif d'absence) pour un refus déterministe côté agent.
+    if contexte is not None:
+        contexte.dernier_rapport_recherche = rapport
+
     # Aucun résultat n'est pas une erreur technique.
     # L'agent pourra reformuler la requête ou changer ses filtres.
     if rapport.est_vide:

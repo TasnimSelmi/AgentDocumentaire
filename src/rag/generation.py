@@ -418,7 +418,7 @@ def _message_contexte_insuffisant(recherche: RapportRecherche) -> str:
     )
 
 
-def _refus(
+def refuser_sans_generation(
     question: str,
     recherche: RapportRecherche,
     profil: Profil,
@@ -426,7 +426,17 @@ def _refus(
     debut: float,
     profil_domaine: DomainProfile | None = None,
 ) -> ReponseRAG:
-    """Construit une réponse de refus sans jamais appeler le LLM."""
+    """
+    Construit une réponse de refus sans jamais appeler le LLM.
+
+    Public : réutilisée par `src.agent.nodes` pour le refus déterministe
+    déclenché par le budget de tentatives épuisé (preuves jugées non
+    pertinentes ou non suffisantes par la couche agentique). Le message
+    affiché reste celui de `_message_contexte_insuffisant`, identique à
+    celui du refus RAG non-agentique : la raison précise fournie par
+    l'appelant (score, verdict de suffisance) est ajoutée aux
+    avertissements plutôt que de dupliquer le texte de refus.
+    """
     return ReponseRAG(
         question=question,
         reponse=_message_contexte_insuffisant(recherche),
@@ -489,7 +499,7 @@ def generer_depuis_recherche(
             "Génération court-circuitée : contexte insuffisant (%s).",
             recherche.motif_absence or "aucun passage",
         )
-        return _refus(
+        return refuser_sans_generation(
             question,
             recherche,
             profil,
@@ -500,7 +510,7 @@ def generer_depuis_recherche(
 
     verdict = valider_contexte(recherche)
     if not verdict.suffisant:
-        return _refus(
+        return refuser_sans_generation(
             question,
             recherche,
             profil,

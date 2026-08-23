@@ -37,7 +37,7 @@ rend atteignable. Voir evaluate_retrieval_evidence.py.
 Exemple
 -------
     python -m evaluation.evaluate_end_to_end \\
-        --questions evaluation/data/uda_400.jsonl --limite 50 --nom baseline
+        --questions evaluation/data/finance_esg.jsonl --limite 50 --nom baseline
 """
 
 from __future__ import annotations

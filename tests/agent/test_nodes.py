@@ -2,21 +2,29 @@
 Tests des nœuds du graphe agentique.
 
 Comme pour `tests/agent/test_session.py`, aucun test ici n'exige de serveur
-Ollama ni de collection Qdrant : le LLM est une doublure et l'outil
-`search` est une fabrique factice enregistrée à la place de la vraie
-(`src.tools.search`). `noeud_generer_reponse` est testé en isolant
-`src.rag.generation.generer_reponse` (monkeypatch), puisque ce nœud délègue
-entièrement à ce module et ne doit donc jamais l'appeler réellement ici.
+Ollama ni de collection Qdrant : le LLM est une doublure et l'outil `search`
+est une fabrique factice enregistrée à la place de la vraie
+(`src.tools.search`). La fabrique factice peuple `ContexteOutil.dernier_
+rapport_recherche` exactement comme le fait `src.tools.search._executer_search`,
+avec de vrais `Passage`/`RapportRecherche` (src.rag.retrieval) — pas
+seulement des `SourceOutil` — puisque c'est ce rapport que `noeud_evaluer_
+preuves` lit désormais, et que `noeud_generer_reponse` doit réutiliser tel
+quel (voir la section "double retrieval" ci-dessous).
+
+`noeud_generer_reponse` est testé en isolant
+`src.rag.generation.generer_depuis_recherche` (monkeypatch), puisque ce
+nœud délègue entièrement à cette fonction et ne doit donc jamais l'appeler
+réellement ici — ni, surtout, jamais appeler une seconde recherche.
 
 Les scores factices ci-dessous encadrent volontairement
-`nodes.SEUIL_PERTINENCE_MINIMALE` (0.08) : voir le commentaire de calibrage
+`nodes.SEUIL_PERTINENCE_MINIMALE` (0.15) : voir le commentaire de calibrage
 dans `src/agent/nodes.py` pour les scores réels observés (reranker
 BAAI/bge-reranker-v2-m3) qui justifient ce seuil.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable, Sequence
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -25,19 +33,51 @@ from pydantic import BaseModel, Field
 from src.agent import nodes
 from src.agent.graph_state import EtatGraphe
 from src.agent.session import construire_session
+from src.rag.generation import ReponseRAG
+from src.rag.retrieval import Passage, RapportRecherche
 from src.tools.base import DefinitionOutil, ResultatOutil, SourceOutil
 
-# Au-dessus du seuil (0.08) : cas net observé en smoke test réel (0.12 à 0.90).
+# Au-dessus du seuil (0.15) : cas net observé en smoke test réel (0.31 à 0.9991).
 _SCORE_EVIDENCE_FORTE = 0.90
 # Sous le seuil mais non nul : c'est exactement le cas qui échappait à
 # l'ancienne heuristique (nombre_preuves >= 1) — un passage existe, mais son
-# score de reranking le désigne comme non pertinent (0.03 à 0.06 observés en
+# score de reranking le désigne comme non pertinent (0.01 à 0.09 observés en
 # smoke test réel sur des requêtes hors-corpus).
 _SCORE_EVIDENCE_FAIBLE = 0.03
 
 
 class _ArgsSearchFactice(BaseModel):
     requete: str = Field(default="", description="Requête factice.")
+
+
+def _un_passage(score: float, citation: str = "S1") -> Passage:
+    return Passage(
+        citation=citation,
+        rang=1,
+        point_id="p1",
+        doc_id="d1",
+        chunk_index=0,
+        texte="Un extrait.",
+        source="doc.pdf",
+        nom_fichier="doc.pdf",
+        page=1,
+        categorie="",
+        score_recherche=score,
+        score_reranking=score,
+    )
+
+
+def _un_rapport(passages: list[Passage], requete: str = "peu importe") -> RapportRecherche:
+    return RapportRecherche(
+        requete=requete,
+        profil="generic",
+        filtres={},
+        passages=passages,
+        candidats_recuperes=len(passages),
+        reranking_utilise=True,
+        seuil_applique=None,
+        duree_secondes=0.01,
+    )
 
 
 def _une_source(score: float) -> SourceOutil:
@@ -51,21 +91,28 @@ def _une_source(score: float) -> SourceOutil:
     )
 
 
-def _outil_search(*, score: float | None) -> DefinitionOutil:
+def _outil_search_sequence(scores: Sequence[float | None]) -> Callable[[], DefinitionOutil]:
     """
-    Fabrique un outil `search` factice.
+    Fabrique de recherche factice à scores contrôlés, un par appel successif
+    (le dernier est répété si la séquence est épuisée).
 
-    `score=None` simule un résultat vide (aucun passage) ; toute autre
-    valeur simule un passage unique portant ce score de pertinence.
+    Peuple `contexte.dernier_rapport_recherche` avec un vrai `RapportRecherche`,
+    exactement comme le fait `src.tools.search._executer_search` : c'est ce
+    champ, pas `contexte.sources`, que `noeud_evaluer_preuves` lit désormais.
     """
+    etat_compteur = {"i": 0}
 
     def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        index = min(etat_compteur["i"], len(scores) - 1)
+        etat_compteur["i"] += 1
+        score = scores[index]
+
+        rapport = _un_rapport([] if score is None else [_un_passage(score)])
+        if contexte is not None:
+            contexte.dernier_rapport_recherche = rapport
+
         if score is None:
-            return ResultatOutil(
-                outil="search",
-                succes=True,
-                message="Aucun passage pertinent trouvé.",
-            )
+            return ResultatOutil(outil="search", succes=True, message="Rien trouvé.")
         return ResultatOutil(
             outil="search",
             succes=True,
@@ -73,12 +120,20 @@ def _outil_search(*, score: float | None) -> DefinitionOutil:
             sources=[_une_source(score)],
         )
 
-    return DefinitionOutil(
-        nom="search",
-        description="Search factice à score contrôlé.",
-        schema_arguments=_ArgsSearchFactice,
-        fonction=_fonction,
-    )
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="search",
+            description="Search factice à scores contrôlés.",
+            schema_arguments=_ArgsSearchFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique
+
+
+def _outil_search(*, score: float | None) -> DefinitionOutil:
+    """Score fixe, répété à chaque appel."""
+    return _outil_search_sequence([score])()
 
 
 def _outil_search_evidence_forte() -> DefinitionOutil:
@@ -100,10 +155,47 @@ class _LLMNonSollicite:
         raise AssertionError("Aucun LLM ne devrait être invoqué dans ce test.")
 
 
-def _session_factice(*, fabriques, max_tentatives: int = 6):
+class _LLMScripte:
+    """
+    Doublure distinguant les deux usages LLM du graphe (reformulation et
+    jugement de suffisance) en inspectant le message système — les deux
+    passent par `invoquer_llm` avec des messages système différents — et
+    répondant selon des scripts fournis séparément.
+    """
+
+    def __init__(
+        self,
+        *,
+        reformulations: Sequence[str] = (),
+        verdicts_suffisance: Sequence[str] = (),
+    ) -> None:
+        self._reformulations = list(reformulations)
+        self._verdicts = list(verdicts_suffisance)
+        self.appels_reformulation = 0
+        self.appels_suffisance = 0
+
+    def invoke(self, messages: Any) -> AIMessage:
+        systeme = messages[0].content
+
+        if "reformules une requête" in systeme:
+            self.appels_reformulation += 1
+            if self._reformulations:
+                return AIMessage(content=self._reformulations.pop(0))
+            return AIMessage(content='{"requete_reformulee": "reformulation"}')
+
+        if "juges si des passages" in systeme:
+            self.appels_suffisance += 1
+            if self._verdicts:
+                return AIMessage(content=self._verdicts.pop(0))
+            return AIMessage(content='{"suffisant": false, "raison": "défaut de test"}')
+
+        raise AssertionError(f"Message système inattendu : {systeme[:80]!r}")
+
+
+def _session_factice(*, fabriques, llm: Any = None, max_tentatives: int = 6):
     return construire_session(
         "Quelles sont les conditions de résiliation ?",
-        llm=_LLMNonSollicite(),
+        llm=llm if llm is not None else _LLMNonSollicite(),
         charger_profil_domaine=False,
         fabriques=fabriques,
         max_tentatives=max_tentatives,
@@ -125,6 +217,7 @@ def test_rechercher_consomme_une_tentative_et_accumule_les_sources():
     assert session.etat.tentatives == 1
     assert session.nombre_preuves == 1
     assert "outil" in session.etat.noms_etapes()
+    assert session.contexte.dernier_rapport_recherche is not None
 
 
 def test_rechercher_leve_si_le_budget_est_deja_epuise():
@@ -139,30 +232,60 @@ def test_rechercher_leve_si_le_budget_est_deja_epuise():
 
 
 # ---------------------------------------------------------------------------
-# noeud_evaluer_preuves : evidence forte / faible / vide
+# noeud_evaluer_preuves : niveau 1 (pertinence) et niveau 2 (suffisance)
 # ---------------------------------------------------------------------------
 
 
-def test_evaluer_preuves_suffisant_si_evidence_forte():
-    session = _session_factice(fabriques=[_outil_search_evidence_forte])
+def test_evaluer_preuves_pertinent_et_suffisant():
+    llm = _LLMScripte(verdicts_suffisance=['{"suffisant": true, "raison": "ok", "elements_support": ["S1"]}'])
+    session = _session_factice(fabriques=[_outil_search_evidence_forte], llm=llm)
     session.executer_outil("search", requete="peu importe")
     etat = EtatGraphe(session=session)
 
     mise_a_jour = nodes.noeud_evaluer_preuves(etat)
 
+    assert mise_a_jour["preuves_pertinentes"] is True
     assert mise_a_jour["preuves_suffisantes"] is True
-    derniere_trace = session.etat.trace[-1]
-    assert derniere_trace.nom == "evaluation_preuves"
-    assert derniere_trace.donnees["suffisant"] is True
-    assert derniere_trace.donnees["score_pertinence_maximal"] == _SCORE_EVIDENCE_FORTE
-    assert derniere_trace.donnees["seuil_pertinence"] == nodes.SEUIL_PERTINENCE_MINIMALE
+    assert llm.appels_suffisance == 1
+
+    noms = session.etat.noms_etapes()
+    assert noms[-2:] == ["evaluation_pertinence", "evaluation_suffisance"]
+    trace_pertinence = session.etat.trace[-2]
+    assert trace_pertinence.donnees["pertinent"] is True
+    assert trace_pertinence.donnees["score_pertinence_maximal"] == _SCORE_EVIDENCE_FORTE
+    assert trace_pertinence.donnees["seuil_pertinence"] == nodes.SEUIL_PERTINENCE_MINIMALE
+    trace_suffisance = session.etat.trace[-1]
+    assert trace_suffisance.donnees["suffisant"] is True
+    assert trace_suffisance.donnees["elements_support"] == ["S1"]
 
 
-def test_evaluer_preuves_insuffisant_si_evidence_faible():
+def test_evaluer_preuves_pertinent_mais_insuffisant():
     """
-    Un passage existe (`nombre_preuves == 1`) mais son score de pertinence
-    est sous le seuil : c'est exactement le cas que l'ancienne heuristique
-    (nombre_preuves >= 1) ne détectait pas.
+    Cas central de cette tâche : un passage thématiquement pertinent (score
+    au-dessus du seuil) mais qui ne contient pas la valeur précise demandée.
+    Le niveau 1 passe, le niveau 2 doit pouvoir le rattraper.
+    """
+    llm = _LLMScripte(
+        verdicts_suffisance=[
+            '{"suffisant": false, "raison": "le passage parle du bon sujet mais '
+            'ne donne pas la valeur demandée", "elements_support": []}'
+        ]
+    )
+    session = _session_factice(fabriques=[_outil_search_evidence_forte], llm=llm)
+    session.executer_outil("search", requete="peu importe")
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_evaluer_preuves(etat)
+
+    assert mise_a_jour["preuves_pertinentes"] is True
+    assert mise_a_jour["preuves_suffisantes"] is False
+    assert "ne donne pas la valeur demandée" in mise_a_jour["raison_insuffisance"]
+
+
+def test_evaluer_preuves_non_pertinent_ne_declenche_jamais_le_juge_de_suffisance():
+    """
+    Le niveau 2 ne doit jamais être payé sur un cas déjà tranché par le
+    niveau 1 : `_LLMNonSollicite` lève si `.invoke()` est appelé.
     """
     session = _session_factice(fabriques=[_outil_search_evidence_faible])
     session.executer_outil("search", requete="peu importe")
@@ -170,24 +293,103 @@ def test_evaluer_preuves_insuffisant_si_evidence_faible():
 
     mise_a_jour = nodes.noeud_evaluer_preuves(etat)
 
-    assert mise_a_jour["preuves_suffisantes"] is False
+    assert mise_a_jour["preuves_pertinentes"] is False
+    assert mise_a_jour["preuves_suffisantes"] is None
     derniere_trace = session.etat.trace[-1]
-    assert derniere_trace.donnees["nombre_preuves"] == 1
-    assert derniere_trace.donnees["suffisant"] is False
+    assert derniere_trace.nom == "evaluation_pertinence"
     assert derniere_trace.donnees["score_pertinence_maximal"] == _SCORE_EVIDENCE_FAIBLE
 
 
-def test_evaluer_preuves_insuffisant_si_resultat_vide():
+def test_evaluer_preuves_resultat_vide():
     session = _session_factice(fabriques=[_outil_search_sans_resultats])
     session.executer_outil("search", requete="peu importe")
     etat = EtatGraphe(session=session)
 
     mise_a_jour = nodes.noeud_evaluer_preuves(etat)
 
-    assert mise_a_jour["preuves_suffisantes"] is False
+    assert mise_a_jour["preuves_pertinentes"] is False
+    assert mise_a_jour["preuves_suffisantes"] is None
     derniere_trace = session.etat.trace[-1]
     assert derniere_trace.donnees["nombre_preuves"] == 0
     assert derniere_trace.donnees["score_pertinence_maximal"] == 0.0
+
+
+def test_evaluer_preuves_sans_rapport_du_tout_est_traite_comme_non_pertinent():
+    """`dernier_rapport_recherche` peut rester `None` (search jamais réussi)."""
+    session = _session_factice(fabriques=[_outil_search_evidence_forte])
+    etat = EtatGraphe(session=session)  # aucune recherche exécutée
+
+    mise_a_jour = nodes.noeud_evaluer_preuves(etat)
+
+    assert mise_a_jour["preuves_pertinentes"] is False
+    assert session.contexte.dernier_rapport_recherche is None
+
+
+@pytest.mark.parametrize(
+    "reponse_llm",
+    [
+        "ceci n'est pas du JSON",
+        '{"raison": "champ suffisant manquant"}',
+        '{"suffisant": "oui"}',
+    ],
+)
+def test_juger_suffisance_echec_ou_structure_invalide_retombe_sur_non_suffisant(reponse_llm):
+    """
+    Le jugement de suffisance ne doit jamais conclure « suffisant » par
+    défaut : JSON invalide, champ manquant ou mal typé retombent tous sur un
+    verdict conservateur.
+    """
+    llm = _LLMScripte(verdicts_suffisance=[reponse_llm])
+    session = _session_factice(fabriques=[_outil_search_evidence_forte], llm=llm)
+    session.executer_outil("search", requete="peu importe")
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_evaluer_preuves(etat)
+
+    assert mise_a_jour["preuves_pertinentes"] is True
+    assert mise_a_jour["preuves_suffisantes"] is False
+    trace_suffisance = session.etat.trace[-1]
+    assert trace_suffisance.donnees["origine"] == "repli_technique"
+
+
+def test_juger_suffisance_llm_indisponible_retombe_sur_non_suffisant():
+    class _LLMExplose:
+        def invoke(self, messages: Any):
+            raise RuntimeError("Ollama injoignable.")
+
+    session = _session_factice(fabriques=[_outil_search_evidence_forte], llm=_LLMExplose())
+    session.executer_outil("search", requete="peu importe")
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_evaluer_preuves(etat)
+
+    assert mise_a_jour["preuves_suffisantes"] is False
+
+
+def test_stagnation_detectee_quand_le_score_ne_bouge_pas():
+    session = _session_factice(fabriques=[_outil_search_evidence_faible])
+
+    session.executer_outil("search", requete="v1")
+    nodes.noeud_evaluer_preuves(EtatGraphe(session=session))  # 1re évaluation : pas de stagnation possible
+
+    session.executer_outil("search", requete="v2")  # même score factice
+    mise_a_jour = nodes.noeud_evaluer_preuves(EtatGraphe(session=session))
+
+    assert mise_a_jour["stagnation"] is True
+
+
+def test_pas_de_stagnation_quand_le_score_progresse():
+    session = _session_factice(
+        fabriques=[_outil_search_sequence([0.03, 0.12])]
+    )
+
+    session.executer_outil("search", requete="v1")
+    nodes.noeud_evaluer_preuves(EtatGraphe(session=session))
+
+    session.executer_outil("search", requete="v2")
+    mise_a_jour = nodes.noeud_evaluer_preuves(EtatGraphe(session=session))
+
+    assert mise_a_jour["stagnation"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -195,45 +397,62 @@ def test_evaluer_preuves_insuffisant_si_resultat_vide():
 # ---------------------------------------------------------------------------
 
 
-def test_router_vers_generer_reponse_si_preuves_suffisantes():
+def test_router_vers_generer_reponse_si_pertinent_et_suffisant():
     session = _session_factice(fabriques=[_outil_search_evidence_forte])
-    etat = EtatGraphe(session=session, preuves_suffisantes=True)
+    etat = EtatGraphe(session=session, preuves_pertinentes=True, preuves_suffisantes=True)
 
     assert nodes.router_apres_evaluation(etat) == "generer_reponse"
 
 
-def test_router_vers_reformuler_si_preuves_insuffisantes_et_budget_restant():
+def test_router_vers_reformuler_si_pertinent_mais_insuffisant_et_budget_restant():
+    session = _session_factice(fabriques=[_outil_search_evidence_forte], max_tentatives=3)
+    session.etat.incrementer_tentative()
+    etat = EtatGraphe(session=session, preuves_pertinentes=True, preuves_suffisantes=False)
+
+    assert nodes.router_apres_evaluation(etat) == "reformuler"
+
+
+def test_router_vers_reformuler_si_non_pertinent_et_budget_restant():
     session = _session_factice(fabriques=[_outil_search_evidence_faible], max_tentatives=3)
     session.etat.incrementer_tentative()
-    etat = EtatGraphe(session=session, preuves_suffisantes=False)
+    etat = EtatGraphe(session=session, preuves_pertinentes=False, preuves_suffisantes=None)
 
     assert nodes.router_apres_evaluation(etat) == "reformuler"
 
 
 def test_router_vers_generer_reponse_si_budget_epuise_meme_sans_preuves():
-    """
-    L'abstention n'est pas gérée ici : elle appartient à
-    `generer_reponse` -> `src.rag.generation`, qui refuse déjà sourcé
-    quand le contexte est insuffisant.
-    """
     session = _session_factice(fabriques=[_outil_search_sans_resultats], max_tentatives=1)
     session.etat.incrementer_tentative()
-    etat = EtatGraphe(session=session, preuves_suffisantes=False)
+    etat = EtatGraphe(session=session, preuves_pertinentes=False, preuves_suffisantes=None)
 
     assert not session.etat.peut_reessayer
     assert nodes.router_apres_evaluation(etat) == "generer_reponse"
 
 
+def test_router_vers_generer_reponse_si_stagnation_meme_avec_budget_restant():
+    session = _session_factice(fabriques=[_outil_search_evidence_faible], max_tentatives=6)
+    session.etat.incrementer_tentative()
+    etat = EtatGraphe(
+        session=session,
+        preuves_pertinentes=False,
+        preuves_suffisantes=None,
+        stagnation=True,
+    )
+
+    assert session.etat.peut_reessayer
+    assert nodes.router_apres_evaluation(etat) == "generer_reponse"
+
+
 def test_router_lit_la_decision_deja_calculee_sans_la_recalculer():
     """
-    Le router ne doit jamais recalculer un jugement de pertinence à partir
-    de `session` : il lit uniquement `etat.preuves_suffisantes`, pour ne
-    jamais diverger de ce que `evaluer_preuves` a journalisé.
+    Le router ne doit jamais recalculer un jugement à partir de `session` :
+    il lit uniquement les champs de `etat`, pour ne jamais diverger de ce
+    que `evaluer_preuves` a journalisé.
     """
     session = _session_factice(fabriques=[_outil_search_evidence_forte], max_tentatives=3)
     session.executer_outil("search", requete="peu importe")  # score fort réel
 
-    etat_incoherent = EtatGraphe(session=session, preuves_suffisantes=False)
+    etat_incoherent = EtatGraphe(session=session, preuves_pertinentes=False, preuves_suffisantes=None)
 
     assert nodes.router_apres_evaluation(etat_incoherent) == "reformuler"
 
@@ -273,6 +492,33 @@ def test_reformuler_met_a_jour_la_requete_courante():
     assert session.etat.a_ete_reformulee
 
 
+def test_reformuler_transmet_la_raison_d_insuffisance_au_prompt():
+    session = construire_session(
+        "Quel est le niveau exact de la métrique X ?",
+        llm=_LLMReformulationValide(),
+        charger_profil_domaine=False,
+        fabriques=[_outil_search_sans_resultats],
+    )
+    capture: dict[str, Any] = {}
+    llm_original = session.llm
+
+    class _LLMCapture:
+        def invoke(self, messages: Any):
+            capture["utilisateur"] = messages[1].content
+            return llm_original.invoke(messages)
+
+    session.llm = _LLMCapture()
+    etat = EtatGraphe(
+        session=session,
+        preuves_pertinentes=True,
+        raison_insuffisance="le passage parle du sujet mais pas de la valeur exacte",
+    )
+
+    nodes.noeud_reformuler(etat)
+
+    assert "valeur exacte" in capture["utilisateur"]
+
+
 @pytest.mark.parametrize("faux_llm", [_LLMReformulationJSONInvalide(), _LLMIndisponible()])
 def test_reformuler_echec_ne_casse_pas_et_journalise(faux_llm):
     session = construire_session(
@@ -295,29 +541,122 @@ def test_reformuler_echec_ne_casse_pas_et_journalise(faux_llm):
 # ---------------------------------------------------------------------------
 
 
-def test_generer_reponse_delegue_a_la_generation_rag(monkeypatch):
+def _reponse_factice(question: str = "") -> ReponseRAG:
+    return ReponseRAG(
+        question=question,
+        reponse="Réponse factice.",
+        profil="generic",
+        contexte_suffisant=True,
+        citations_valides=True,
+        citations_reparees=False,
+        sources=[],
+    )
+
+
+def test_generer_reponse_delegue_a_generer_depuis_recherche_avec_le_meme_rapport(monkeypatch):
+    """
+    Preuve du correctif « double retrieval » : le nœud doit transmettre
+    EXACTEMENT l'objet `RapportRecherche` déjà accumulé par `noeud_rechercher`
+    (identité d'objet, pas une reconstruction), et ne jamais réexécuter
+    l'outil `search`.
+    """
     appels: list[dict[str, Any]] = []
 
-    class _ReponseFactice:
-        contexte_suffisant = True
-        sources: list[Any] = []
-
-    def _fausse_generer_reponse(**kwargs: Any):
+    def _fausse_generation(**kwargs: Any) -> ReponseRAG:
         appels.append(kwargs)
-        return _ReponseFactice()
+        return _reponse_factice(kwargs["question"])
 
-    monkeypatch.setattr(nodes, "generer_reponse", _fausse_generer_reponse)
+    monkeypatch.setattr(nodes, "generer_depuis_recherche", _fausse_generation)
 
     session = _session_factice(fabriques=[_outil_search_evidence_forte])
     session.executer_outil("search", requete="peu importe")
-    etat = EtatGraphe(session=session)
+    rapport_attendu = session.contexte.dernier_rapport_recherche
+    tentatives_avant = session.etat.tentatives
 
+    etat = EtatGraphe(session=session, preuves_pertinentes=True, preuves_suffisantes=True)
     mise_a_jour = nodes.noeud_generer_reponse(etat)
 
     assert len(appels) == 1
     assert appels[0]["question"] == session.etat.requete_courante
+    assert appels[0]["recherche"] is rapport_attendu
     assert mise_a_jour["reponse"] is not None
     assert session.etat.noms_etapes()[-1] == "reponse"
+    # Aucune recherche supplémentaire n'a été déclenchée par la génération.
+    assert session.etat.tentatives == tentatives_avant
+
+
+def test_generer_reponse_refuse_sans_llm_si_non_pertinent_et_budget_epuise(monkeypatch):
+    """
+    Cœur de cette tâche : preuves non pertinentes, budget épuisé -> refus
+    déterministe, ZÉRO appel au LLM de génération.
+    """
+
+    def _generation_interdite(**kwargs: Any):
+        raise AssertionError("generer_depuis_recherche ne doit pas être appelé ici.")
+
+    monkeypatch.setattr(nodes, "generer_depuis_recherche", _generation_interdite)
+
+    session = _session_factice(fabriques=[_outil_search_evidence_faible], max_tentatives=1)
+    session.executer_outil("search", requete="peu importe")
+    session.etat.incrementer_tentative()  # simule le budget épuisé après cette tentative
+    assert not session.etat.peut_reessayer
+
+    etat = EtatGraphe(session=session, preuves_pertinentes=False, preuves_suffisantes=None)
+    mise_a_jour = nodes.noeud_generer_reponse(etat)
+
+    resultat = mise_a_jour["reponse"]
+    assert resultat.contexte_suffisant is False
+    assert resultat.sources == []
+    assert "Recherche interrompue" in resultat.avertissements[0]
+    assert "budget de tentatives épuisé" in resultat.avertissements[0]
+
+
+def test_generer_reponse_refuse_sans_llm_si_pertinent_mais_insuffisant_et_budget_epuise(monkeypatch):
+    """
+    Autre branche du même correctif : le score de pertinence était bon, mais
+    le niveau 2 a jugé les preuves insuffisantes, et le budget est épuisé.
+    Même exigence : aucun appel au LLM de génération.
+    """
+
+    def _generation_interdite(**kwargs: Any):
+        raise AssertionError("generer_depuis_recherche ne doit pas être appelé ici.")
+
+    monkeypatch.setattr(nodes, "generer_depuis_recherche", _generation_interdite)
+
+    session = _session_factice(fabriques=[_outil_search_evidence_forte], max_tentatives=1)
+    session.executer_outil("search", requete="peu importe")
+    session.etat.incrementer_tentative()
+    assert not session.etat.peut_reessayer
+
+    etat = EtatGraphe(
+        session=session,
+        preuves_pertinentes=True,
+        preuves_suffisantes=False,
+        raison_insuffisance="la valeur exacte n'apparaît pas dans les passages",
+    )
+    mise_a_jour = nodes.noeud_generer_reponse(etat)
+
+    resultat = mise_a_jour["reponse"]
+    assert resultat.contexte_suffisant is False
+    assert "valeur exacte" in resultat.avertissements[0]
+
+
+def test_generer_reponse_hors_sujet_refuse_proprement_sans_rapport(monkeypatch):
+    """Comportement hors-sujet conservé : aucun rapport n'a jamais été construit."""
+
+    def _generation_interdite(**kwargs: Any):
+        raise AssertionError("generer_depuis_recherche ne doit pas être appelé ici.")
+
+    monkeypatch.setattr(nodes, "generer_depuis_recherche", _generation_interdite)
+
+    session = _session_factice(fabriques=[_outil_search_evidence_forte])
+    etat = EtatGraphe(session=session, preuves_pertinentes=False, preuves_suffisantes=None)
+
+    mise_a_jour = nodes.noeud_generer_reponse(etat)
+
+    resultat = mise_a_jour["reponse"]
+    assert resultat.contexte_suffisant is False
+    assert "Corpus indisponible" in resultat.avertissements[0]
 
 
 def test_generer_reponse_ne_journalise_pas_contexte_suffisant_comme_tel(monkeypatch):
@@ -325,21 +664,20 @@ def test_generer_reponse_ne_journalise_pas_contexte_suffisant_comme_tel(monkeypa
     `resultat.contexte_suffisant` ne mesure qu'une validité structurelle
     (voir src/rag/validation.py::valider_contexte) : la trace agent ne doit
     pas exposer ce champ sous un nom qui laisserait croire à un jugement de
-    pertinence, ce jugement étant déjà celui, distinct, de
-    `evaluation_preuves`.
+    pertinence ou de suffisance, ce jugement étant déjà celui, distinct, de
+    `evaluation_pertinence` / `evaluation_suffisance`.
     """
-
-    class _ReponseFactice:
-        contexte_suffisant = True
-        sources: list[Any] = []
-
-    monkeypatch.setattr(nodes, "generer_reponse", lambda **kw: _ReponseFactice())
+    monkeypatch.setattr(
+        nodes, "generer_depuis_recherche", lambda **kw: _reponse_factice(kw["question"])
+    )
 
     session = _session_factice(fabriques=[_outil_search_evidence_forte])
-    etat = EtatGraphe(session=session)
+    session.executer_outil("search", requete="peu importe")
+    etat = EtatGraphe(session=session, preuves_pertinentes=True, preuves_suffisantes=True)
 
     nodes.noeud_generer_reponse(etat)
 
     donnees = session.etat.trace[-1].donnees
     assert "contexte_suffisant" not in donnees
     assert donnees["rag_contexte_structurellement_valide"] is True
+    assert donnees["genere_par_llm"] is True

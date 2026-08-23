@@ -35,11 +35,11 @@ qui redirige la lecture YAML en mémoire. Le fichier du dépôt n'est jamais
 Exemple
 -------
     python -m evaluation.run_ablation \\
-        --questions evaluation/data/uda_400.jsonl --nom ablation_v1
+        --questions evaluation/data/finance_esg.jsonl --nom ablation_v1
 
     # Ne lancer que les configurations rapides
     python -m evaluation.run_ablation \\
-        --questions evaluation/data/uda_400.jsonl --sans-sous-processus
+        --questions evaluation/data/finance_esg.jsonl --sans-sous-processus
 """
 
 from __future__ import annotations
