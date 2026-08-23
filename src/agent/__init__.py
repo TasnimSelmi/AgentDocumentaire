@@ -19,8 +19,15 @@ Usage :
     session = construire_session("Quelles sont les conditions de résiliation ?")
     session.noms_outils()
     resultat = session.executer_outil("search", requete=session.etat.requete_courante)
+
+Ou, pour la boucle complète recherche/reformulation/réponse déjà orchestrée :
+
+    from src.agent import invoquer_agent
+
+    reponse = invoquer_agent("Quelles sont les conditions de résiliation ?")
 """
 
+from src.agent.graph import EtatGraphe, construire_graphe, invoquer_agent
 from src.agent.session import (
     ErreurSession,
     SessionAgent,
@@ -43,4 +50,7 @@ __all__ = [
     "EtapeTrace",
     "ErreurEtatAgent",
     "BudgetTentativesEpuise",
+    "invoquer_agent",
+    "construire_graphe",
+    "EtatGraphe",
 ]
