@@ -34,7 +34,7 @@ from src.agent import nodes
 from src.agent.graph_state import EtatGraphe
 from src.agent.session import construire_session
 from src.rag.generation import ReponseRAG
-from src.rag.retrieval import Passage, RapportRecherche
+from src.rag.retrieval import Passage, PerimetreDocumentaire, RapportRecherche
 from src.tools.base import DefinitionOutil, ResultatOutil, SourceOutil
 
 # Au-dessus du seuil (0.15) : cas net observé en smoke test réel (0.31 à 0.9991).
@@ -200,6 +200,199 @@ def _session_factice(*, fabriques, llm: Any = None, max_tentatives: int = 6):
         fabriques=fabriques,
         max_tentatives=max_tentatives,
     )
+
+
+class _ArgsSummarizeFactice(BaseModel):
+    objectif: str | None = Field(default=None)
+    documents: list[str] | None = Field(default=None)
+    format: str = Field(default="court")
+
+
+def _outil_summarize_capture(
+    resultat: ResultatOutil,
+) -> tuple[Callable[[], DefinitionOutil], list[dict[str, Any]]]:
+    """Fabrique factice de `summarize` qui enregistre les arguments reçus."""
+    appels: list[dict[str, Any]] = []
+
+    def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        appels.append(kw)
+        return resultat
+
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="summarize",
+            description="Summarize factice.",
+            schema_arguments=_ArgsSummarizeFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique, appels
+
+
+# ---------------------------------------------------------------------------
+# _detecter_intention (Action 03B)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "requete,attendu",
+    [
+        ("Résume le rapport CNIL 2023.", "summarize"),
+        ("Fais-moi un résumé du rapport TotalEnergies sur le climat.", "summarize"),
+        ("Summarize the CNIL annual report.", "summarize"),
+        ("Give me a summary of the report please.", "summarize"),
+        ("Quels sont les points clés du rapport ?", "summarize"),
+        ("What are the key points of this document?", "summarize"),
+        ("Fais une synthèse des engagements climatiques.", "summarize"),
+        ("Peux-tu me faire un sommaire du document ?", "summarize"),
+        ("tldr this report please", "summarize"),
+        ("Who is the CEO of company X?", "search"),
+        ("Quelle est la politique de confidentialité de l'entreprise ?", "search"),
+        ("What were the total emissions in 2022?", "search"),
+        ("Quel est le montant de la sanction infligée à Criteo ?", "search"),
+        ("", "search"),
+    ],
+)
+def test_detecter_intention(requete: str, attendu: str) -> None:
+    assert nodes._detecter_intention(requete) == attendu
+
+
+def test_detecter_intention_insensible_a_la_casse_et_aux_accents() -> None:
+    assert nodes._detecter_intention("RÉSUMÉ DU RAPPORT") == "summarize"
+    assert nodes._detecter_intention("resume du rapport") == "summarize"
+
+
+# ---------------------------------------------------------------------------
+# noeud_detecter_intention / router_intention
+# ---------------------------------------------------------------------------
+
+
+def test_noeud_detecter_intention_journalise_la_trace() -> None:
+    session = _session_factice(fabriques=[_outil_search_evidence_forte])
+    session.etat.requete_courante = "Résume le rapport CNIL 2023."
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_detecter_intention(etat)
+
+    assert mise_a_jour["intention"] == "summarize"
+    assert session.etat.trace[-1].nom == "intention"
+    assert session.etat.trace[-1].donnees["intention"] == "summarize"
+
+
+def test_noeud_detecter_intention_search_par_defaut() -> None:
+    session = _session_factice(fabriques=[_outil_search_evidence_forte])
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_detecter_intention(etat)
+
+    assert mise_a_jour["intention"] == "search"
+
+
+def test_router_intention_lit_le_champ_deja_calcule() -> None:
+    session = _session_factice(fabriques=[_outil_search_evidence_forte])
+
+    assert nodes.router_intention(EtatGraphe(session=session, intention="summarize")) == "summarize"
+    assert nodes.router_intention(EtatGraphe(session=session, intention="search")) == "rechercher"
+    # Repli sûr : toute valeur inattendue (y compris None) route vers l'existant.
+    assert nodes.router_intention(EtatGraphe(session=session, intention=None)) == "rechercher"
+
+
+# ---------------------------------------------------------------------------
+# noeud_summarize
+# ---------------------------------------------------------------------------
+
+
+def test_noeud_summarize_transmet_les_documents_resolus(monkeypatch) -> None:
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("doc-cnil",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
+    fabrique, appels = _outil_summarize_capture(resultat)
+
+    session = construire_session(
+        "Résume le rapport CNIL 2023.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_summarize(etat)
+
+    assert appels == [{"objectif": "Résume le rapport CNIL 2023.", "documents": ["doc-cnil"]}]
+    assert mise_a_jour["reponse"] is resultat
+    # Passe bien par le registre : le résultat est consigné dans le contexte.
+    assert session.contexte.resultats[-1].outil == "summarize"
+    assert session.etat.trace[-1].nom == "summarize"
+    assert session.etat.trace[-1].donnees["resolution_documentaire"] == "exact"
+
+
+def test_noeud_summarize_sans_document_resolu_passe_documents_none(monkeypatch) -> None:
+    perimetre = PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance")
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
+    fabrique, appels = _outil_summarize_capture(resultat)
+
+    session = construire_session(
+        "Résume les éléments trouvés.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique],
+    )
+    etat = EtatGraphe(session=session)
+
+    nodes.noeud_summarize(etat)
+
+    assert appels == [{"objectif": "Résume les éléments trouvés.", "documents": None}]
+
+
+def test_noeud_summarize_ambiguite_ne_choisit_pas_un_document_arbitraire(monkeypatch) -> None:
+    perimetre = PerimetreDocumentaire(
+        statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat = ResultatOutil(outil="summarize", succes=False, message="échec")
+    fabrique, appels = _outil_summarize_capture(resultat)
+
+    session = construire_session(
+        "Résume le rapport.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique],
+    )
+    etat = EtatGraphe(session=session)
+
+    nodes.noeud_summarize(etat)
+
+    assert appels[0]["documents"] is None
+
+
+def test_noeud_summarize_resolution_en_echec_ne_casse_pas_le_graphe(monkeypatch) -> None:
+    def _explose(requete: str):
+        raise RuntimeError("collection indisponible")
+
+    monkeypatch.setattr(nodes, "resoudre_document", _explose)
+
+    resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
+    fabrique, appels = _outil_summarize_capture(resultat)
+
+    session = construire_session(
+        "Résume le rapport CNIL 2023.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_summarize(etat)
+
+    assert appels[0]["documents"] is None
+    assert mise_a_jour["reponse"] is resultat
+    assert session.etat.trace[-1].donnees["resolution_documentaire"] == "erreur"
 
 
 # ---------------------------------------------------------------------------

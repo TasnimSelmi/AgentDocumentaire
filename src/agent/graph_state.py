@@ -48,6 +48,13 @@ class EtatGraphe:
     la reformulation n'a pas fait bouger le score de pertinence d'une
     tentative à l'autre : l'agent peut alors s'arrêter avant
     `max_tentatives` plutôt que de consommer tout le budget pour rien.
+
+    `intention` (Action 03B) — calculée par `noeud_detecter_intention`, lue
+    telle quelle par `router_intention`, jamais recalculée dans le routeur
+    (même discipline que `preuves_pertinentes`/`preuves_suffisantes`
+    ci-dessus). Vaut ``"search"`` ou ``"summarize"``. `reponse` porte alors
+    soit un `ReponseRAG` (chemin SEARCH, inchangé), soit un `ResultatOutil`
+    (chemin SUMMARIZE) — voir `src.agent.graph.invoquer_agent`.
     """
 
     session: SessionAgent
@@ -56,6 +63,7 @@ class EtatGraphe:
     preuves_suffisantes: bool | None = None
     raison_insuffisance: str | None = None
     stagnation: bool = False
+    intention: str | None = None
 
 
 __all__ = ["EtatGraphe"]

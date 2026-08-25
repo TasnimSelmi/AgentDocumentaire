@@ -1,22 +1,30 @@
 """
-Graphe agentique minimal : rechercher -> évaluer -> (répondre | reformuler).
+Graphe agentique : détecter_intention -> (SEARCH | SUMMARIZE).
 
-Premier graphe volontairement réduit à 3 décisions, à valider manuellement
-avant d'y ajouter `extract`/`summarize`/`classify` ou un routage plus fin :
+Branche SEARCH — inchangée depuis le premier graphe (Action « graphe
+minimal ») :
 
     rechercher -> évaluer_preuves -> répondre
                         |
                         +-> reformuler -> rechercher (boucle)
 
-Le routage est 100% déterministe (`router_apres_evaluation`), jamais confié
-au tool-calling du LLM : la fiabilité du function-calling de Qwen3 8B via
-Ollama n'est pas établie dans ce dépôt, et cette boucle doit rester
-prévisible. `SessionAgent.outils_langchain()` reste disponible sans rien
-casser si un routage plus autonome est voulu plus tard.
+Branche SUMMARIZE (Action 03B) :
+
+    summarize -> répondre
+
+Le routage est 100% déterministe, jamais confié au tool-calling du LLM : la
+fiabilité du function-calling de Qwen3 8B via Ollama n'est pas établie dans
+ce dépôt, et le graphe doit rester prévisible — pour `router_apres_evaluation`
+comme pour le nouveau `router_intention` (vocabulaire fermé, voir
+`src.agent.nodes`, jamais un choix de tool par le LLM). `SessionAgent.
+outils_langchain()` reste disponible sans rien casser si un routage plus
+autonome est voulu plus tard.
 
 Ce module ne réimplémente ni le RAG, ni les outils, ni `EtatAgent` /
 `SessionAgent` : il les consomme. `src/agent/state.py` et
-`src/agent/session.py` restent intacts.
+`src/agent/session.py` restent intacts. La branche SEARCH (nœuds et routeur)
+n'a subi aucune modification de comportement : seul le point d'entrée du
+graphe change, de `START -> rechercher` à `START -> detecter_intention`.
 """
 
 from __future__ import annotations
@@ -27,11 +35,14 @@ from langgraph.graph import END, START, StateGraph
 
 from src.agent.graph_state import EtatGraphe
 from src.agent.nodes import (
+    noeud_detecter_intention,
     noeud_evaluer_preuves,
     noeud_generer_reponse,
     noeud_reformuler,
     noeud_rechercher,
+    noeud_summarize,
     router_apres_evaluation,
+    router_intention,
 )
 from src.agent.session import construire_session
 
@@ -44,12 +55,22 @@ def construire_graphe() -> Any:
     """
     graphe = StateGraph(EtatGraphe)
 
+    graphe.add_node("detecter_intention", noeud_detecter_intention)
     graphe.add_node("rechercher", noeud_rechercher)
     graphe.add_node("evaluer_preuves", noeud_evaluer_preuves)
     graphe.add_node("reformuler", noeud_reformuler)
     graphe.add_node("generer_reponse", noeud_generer_reponse)
+    graphe.add_node("summarize", noeud_summarize)
 
-    graphe.add_edge(START, "rechercher")
+    graphe.add_edge(START, "detecter_intention")
+    graphe.add_conditional_edges(
+        "detecter_intention",
+        router_intention,
+        {
+            "rechercher": "rechercher",
+            "summarize": "summarize",
+        },
+    )
     graphe.add_edge("rechercher", "evaluer_preuves")
     graphe.add_conditional_edges(
         "evaluer_preuves",
@@ -61,6 +82,7 @@ def construire_graphe() -> Any:
     )
     graphe.add_edge("reformuler", "rechercher")
     graphe.add_edge("generer_reponse", END)
+    graphe.add_edge("summarize", END)
 
     return graphe.compile()
 
@@ -83,9 +105,14 @@ def invoquer_agent(
             (llm, profil_domaine, max_tentatives, ...).
 
     Returns:
-        Le `ReponseRAG` produit par `generer_reponse`. Le budget de
-        tentatives (`EtatAgent.max_tentatives`) garantit que ce nœud est
-        toujours atteint : la boucle ne peut pas tourner indéfiniment.
+        Selon l'intention détectée (`EtatGraphe.intention`) :
+            - SEARCH : un `ReponseRAG` (`src.rag.generation`), produit par
+              `generer_reponse` — comportement inchangé. Le budget de
+              tentatives (`EtatAgent.max_tentatives`) garantit que ce nœud
+              est toujours atteint : la boucle ne peut pas tourner
+              indéfiniment.
+            - SUMMARIZE : un `ResultatOutil` (`src.tools.base`), le retour
+              tel quel de l'outil `summarize` (succès ou échec).
     """
     session = construire_session(requete, **kwargs_session)
 

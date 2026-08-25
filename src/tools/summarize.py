@@ -1,44 +1,66 @@
 """
 Outil de résumé documentaire de l'agent.
 
-Cet outil ne réalise aucune recherche documentaire.
+Cet outil ne réalise aucune recherche sémantique (aucun embedding, aucun
+reranking, aucune requête Qdrant) : il ne fait que lire des passages déjà
+disponibles et les faire résumer par le LLM.
 
-Il résume exclusivement les sources déjà récupérées par ``search`` et
-stockées dans ``ContexteOutil.sources``.
+Deux modes, distincts et documentés séparément plus bas :
 
-Chaîne d'exécution :
+    Cas A — document explicitement demandé (``documents=[...]``) :
+        nom/référence
+          ↓
+        résolution documentaire (CatalogueDocuments, réutilisée telle quelle)
+          ↓
+        doc_id
+          ↓
+        charger_document(doc_id)  — TOUS les chunks du document, dans l'ordre
+          ↓
+        résumé hiérarchique (map-reduce borné) si le document ne tient pas
+        dans un seul appel LLM
+          ↓
+        résumé final + provenance
 
-    agent
-      ↓
-    search(...)
-      ↓
-    ContexteOutil.sources
-      ↓
-    summarize(...)
-      ↓
-    LLM
-      ↓
-    résumé sourcé
+    Cas B — pas de document explicitement nommé :
+        ContexteOutil.sources (déjà récupérées par ``search``)
+          ↓
+        summarize(...)
+          ↓
+        LLM
+          ↓
+        résumé sourcé
 
-Garanties :
-    - aucun appel à Qdrant ;
-    - aucun embedding ;
+Garanties, dans les deux cas :
+    - aucun appel à Qdrant en dehors de ``charger_document`` (lecture pure,
+      pas de recherche) ;
+    - aucun embedding, aucun reranking ;
     - aucune connaissance externe ;
-    - résumé limité aux passages disponibles ;
     - citations limitées aux sources réellement présentes ;
+    - un résumé sans aucune citation valide n'est jamais rendu comme un
+      succès silencieux (voir ``_resultat_sans_provenance``) ;
     - DomainProfile utilisé uniquement comme contexte métier.
 """
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, Field
 
+from src.config import get_profil
 from src.llm.common import (
     bloc_profil_domaine,
     invoquer_llm,
+)
+from src.rag.retrieval import (
+    CollectionIndisponible,
+    DocumentInconnu,
+    ErreurRecherche,
+    Passage,
+    catalogue,
+    charger_document,
 )
 from src.tools.base import (
     ContexteOutil,
@@ -47,6 +69,8 @@ from src.tools.base import (
     SourceOutil,
     outil,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
@@ -79,9 +103,12 @@ class ArgumentsSummarize(BaseModel):
     documents: list[str] | None = Field(
     default=None,
     description=(
-        "Documents ou entités documentaires à résumer. "
-        "Lorsque cette liste est fournie, seules les sources dont le nom "
-        "correspond à ces valeurs sont utilisées. "
+        "Documents ou entités documentaires à résumer explicitement. "
+        "Lorsque cette liste est fournie, le document est résolu dans le "
+        "corpus indexé et résumé dans son intégralité (pas seulement les "
+        "passages déjà retrouvés par une recherche précédente). "
+        "Si absente, résume les passages déjà disponibles dans le contexte "
+        "de la requête en cours. "
         "N'invente jamais un nom de document."
     ),
 )
@@ -124,6 +151,67 @@ def _bloc_source(
     lignes.append(source.extrait.strip())
 
     return "\n".join(lignes)
+
+
+def _source_depuis_passage(passage: Passage) -> SourceOutil:
+    """Convertit un Passage du Documentary Core en SourceOutil.
+
+    Conversion locale à l'outil, sur le même modèle que
+    `src.tools.search._source_depuis_passage` : les deux outils enveloppent
+    le même Core mais restent indépendants l'un de l'autre.
+    """
+
+    return SourceOutil(
+        doc_id=passage.doc_id,
+        source=passage.source,
+        nom_fichier=passage.nom_fichier,
+        page=passage.page,
+        categorie=passage.categorie,
+        score=0.0,
+        extrait=passage.texte,
+    )
+
+
+# ===========================================================================
+# 2bis. Résolution et chargement d'un document complet (Cas A)
+# ===========================================================================
+
+
+def _resoudre_documents(documents: list[str]) -> tuple[str, ...]:
+    """
+    Résout des noms/identifiants de documents vers leurs doc_id réels.
+
+    Réutilise `CatalogueDocuments.perimetre_explicite`, exactement la même
+    primitive de résolution documentaire que `search`
+    (`rechercher_passages(documents=...)`) : aucune nouvelle logique de
+    résolution de nom n'est introduite ici.
+
+    Lève `DocumentInconnu` si un nom ne correspond à aucun document indexé,
+    ou si le périmètre résolu n'est pas assez fiable pour être exploité
+    (ambigu ou sans identifiant utilisable) — mêmes cas que `search`.
+    """
+    perimetre = catalogue(profil=get_profil()).perimetre_explicite(documents)
+
+    if not perimetre.contraignant:
+        raise DocumentInconnu(
+            "Document non identifiable de façon fiable : "
+            f"{perimetre.raison or 'périmètre ambigu'}."
+        )
+
+    return perimetre.valeurs_filtre
+
+
+def _charger_passages_documents(doc_ids: Sequence[str]) -> list[Passage]:
+    """
+    Charge le contenu complet de chaque document résolu, dans l'ordre de
+    résolution, chaque document restant lui-même dans son ordre documentaire
+    (`charger_document` — pagination Qdrant complète, aucune recherche).
+    """
+    passages: list[Passage] = []
+    for doc_id in doc_ids:
+        passages.extend(charger_document(doc_id))
+    return passages
+
 
 def _filtrer_sources_documents(
     sources: list[SourceOutil],
@@ -169,9 +257,56 @@ def _filtrer_sources_documents(
     return retenues
 
 
+# Budget de caractères d'un seul appel LLM (bloc de passages inclus dans un
+# prompt). Contrainte technique générique — "combien de texte tient dans un
+# appel" — pas une valeur calibrée pour un type de document particulier.
+# Réutilisée à la fois par `_construire_contexte` (mode contexte existant,
+# tronque l'excédent) et par `_partitionner` (mode document complet, ne
+# tronque jamais : répartit en lots supplémentaires à la place).
+LIMITE_CARACTERES_LOT = 16_000
+
+# Borne la réduction hiérarchique du mode document complet : un document dont
+# les résumés partiels ne convergent pas en un seul texte au bout de ce
+# nombre de niveaux force une dernière synthèse unique plutôt que de
+# récurser indéfiniment (voir `_synthetiser`).
+_PROFONDEUR_MAX_SYNTHESE = 3
+
+
+def _partitionner(
+    elements: list[Any],
+    cout: Any,
+    limite_caracteres: int,
+) -> list[list[Any]]:
+    """
+    Regroupe des éléments en lots dont le coût cumulé reste sous la limite.
+
+    Contrairement à `_construire_contexte`, qui tronque l'excédent d'un seul
+    appel, cette fonction ne perd jamais un élément : un dépassement démarre
+    simplement un nouveau lot. Un élément déjà plus coûteux que la limite à
+    lui seul forme son propre lot (il sera transmis tel quel au LLM, sans
+    troncature ici).
+    """
+    lots: list[list[Any]] = []
+    lot: list[Any] = []
+    taille = 0
+
+    for element in elements:
+        cout_element = cout(element) + 8
+        if lot and taille + cout_element > limite_caracteres:
+            lots.append(lot)
+            lot, taille = [], 0
+        lot.append(element)
+        taille += cout_element
+
+    if lot:
+        lots.append(lot)
+
+    return lots
+
+
 def _construire_contexte(
     sources: list[SourceOutil],
-    limite_caracteres: int = 16_000,
+    limite_caracteres: int = LIMITE_CARACTERES_LOT,
 ) -> tuple[str, list[tuple[str, SourceOutil]]]:
     """
     Prépare les passages envoyés au LLM.
@@ -278,6 +413,20 @@ def _instruction_format(format_resume: str) -> str:
     )
 
 
+def _bloc_objectif(objectif: str | None) -> str:
+    """Bloc « OBJECTIF DU RÉSUMÉ », partagé par tous les prompts de ce module."""
+
+    if objectif:
+        return f"""OBJECTIF DU RÉSUMÉ
+{objectif}
+
+"""
+    return """OBJECTIF DU RÉSUMÉ
+Produire une synthèse générale des passages disponibles.
+
+"""
+
+
 def _message_utilisateur(
     contexte_documentaire: str,
     objectif: str | None,
@@ -287,24 +436,86 @@ def _message_utilisateur(
     Respecte strictement l'objectif indiqué.
 N'inclus aucune information qui n'est pas directement nécessaire pour cet objectif."""
 
-    if objectif:
-        objectif_bloc = f"""OBJECTIF DU RÉSUMÉ
-{objectif}
-
-"""
-    else:
-        objectif_bloc = """OBJECTIF DU RÉSUMÉ
-Produire une synthèse générale des passages disponibles.
-
-"""
-
-    return f"""{objectif_bloc}FORMAT
+    return f"""{_bloc_objectif(objectif)}FORMAT
 {_instruction_format(format_resume)}
 
 PASSAGES DOCUMENTAIRES
 {contexte_documentaire}
 
 Rédige maintenant le résumé sourcé."""
+
+
+def _message_utilisateur_lot(
+    contexte_documentaire: str,
+    objectif: str | None,
+    numero_lot: int,
+    total_lots: int,
+) -> str:
+    """
+    Demande de résumé partiel (étape map) pour un lot ordonné de passages
+    d'un même document.
+
+    Volontairement neutre en format (court/détaillé/points_cles) : c'est un
+    artefact intermédiaire, jamais montré tel quel à l'utilisateur — le
+    format demandé ne s'applique qu'à la synthèse finale
+    (`_message_utilisateur_synthese`), pour ne pas perdre d'information utile
+    à cette synthèse en compressant trop tôt.
+    """
+
+    if total_lots > 1:
+        bloc_portee = (
+            f"Ce lot ({numero_lot}/{total_lots}) ne couvre qu'une partie du "
+            "document complet. Résume fidèlement et complètement ce que CE "
+            "LOT contient, sans supposer ni inventer le contenu des autres "
+            "lots. Conserve les identifiants de citation [S..] tels quels."
+        )
+    else:
+        bloc_portee = (
+            "Ce lot couvre l'intégralité du document. Résume-le fidèlement "
+            "et complètement, en conservant les identifiants de citation "
+            "[S..] tels quels."
+        )
+
+    return f"""{_bloc_objectif(objectif)}{bloc_portee}
+
+PASSAGES DOCUMENTAIRES (lot {numero_lot}/{total_lots})
+{contexte_documentaire}
+
+Rédige le résumé partiel de ce lot maintenant."""
+
+
+def _message_utilisateur_synthese(
+    textes_partiels: list[str],
+    objectif: str | None,
+    format_resume: str,
+) -> str:
+    """
+    Demande de synthèse finale (étape reduce) à partir de résumés partiels
+    déjà produits par `_message_utilisateur_lot` (ou d'une réduction
+    intermédiaire — voir `_synthetiser`).
+
+    Ces résumés partiels ne sont jamais présentés comme des sources
+    documentaires : seule la synthèse doit rester rattachée, via les
+    citations [S..] qu'elle conserve, aux passages originaux.
+    """
+
+    bloc_partiels = "\n\n---\n\n".join(
+        f"[Résumé partiel {index}/{len(textes_partiels)}]\n{texte}"
+        for index, texte in enumerate(textes_partiels, start=1)
+    )
+
+    return f"""{_bloc_objectif(objectif)}FORMAT
+{_instruction_format(format_resume)}
+
+Les résumés partiels ci-dessous couvrent ensemble l'intégralité du document, \
+dans l'ordre documentaire. Synthétise-les en un résumé unique et cohérent, \
+en conservant les identifiants de citation [S..] qu'ils contiennent déjà. \
+N'introduis aucune information absente de ces résumés partiels.
+
+RÉSUMÉS PARTIELS
+{bloc_partiels}
+
+Rédige la synthèse finale maintenant."""
 
 
 # ===========================================================================
@@ -351,6 +562,36 @@ def _valider_citations(
 # ===========================================================================
 
 
+def _nettoyer_objectif(objectif: str | None) -> str | None:
+    if not objectif:
+        return None
+    return " ".join(str(objectif).split())
+
+
+def _resultat_sans_provenance(
+    resume: str,
+    citations_invalides: list[str],
+) -> ResultatOutil:
+    """
+    Échec explicite pour un résumé sans aucune citation valide.
+
+    Un résumé factuel sans provenance vérifiable n'est pas un succès
+    dégradé silencieux : `ResultatOutil` n'a pas de statut intermédiaire, et
+    en créer un spécifiquement pour ce cas serait disproportionné. `succes
+    =False` (avec le texte produit conservé dans `donnees` pour diagnostic)
+    est le comportement minimal compatible avec le contrat existant.
+    """
+    return ResultatOutil.echec(
+        "summarize",
+        (
+            "Le résumé produit ne contient aucune citation documentaire "
+            "valide : aucune provenance fiable n'a pu être établie."
+        ),
+        resume=resume,
+        citations_invalides=citations_invalides,
+    )
+
+
 def _executer_summarize(
     *,
     contexte: ContexteOutil | None = None,
@@ -359,9 +600,15 @@ def _executer_summarize(
     documents: list[str] | None = None,
 ) -> ResultatOutil:
     """
-    Résume les sources déjà disponibles dans le contexte partagé.
+    Point d'entrée de l'outil summarize.
 
-    Aucun retrieval n'est effectué.
+    Deux chemins mutuellement exclusifs (voir le docstring du module) :
+        - ``documents`` non vide -> Cas A, document complet
+          (`_executer_summarize_document_complet`) ;
+        - sinon -> Cas B, résumé de ``ContexteOutil.sources`` déjà
+          récupérées par ``search`` (comportement historique, inchangé
+          hormis la correction du cas « zéro citation valide », voir
+          `_resultat_sans_provenance`).
     """
 
     if contexte is None:
@@ -369,6 +616,30 @@ def _executer_summarize(
             "summarize",
             "Aucun contexte d'exécution n'a été fourni.",
         )
+
+    if contexte.llm is None:
+        return ResultatOutil.echec(
+            "summarize",
+            "Aucun LLM n'est disponible dans le contexte d'exécution.",
+        )
+
+    objectif_nettoye = _nettoyer_objectif(objectif)
+
+    documents_nettoyes = [
+        str(document).strip()
+        for document in (documents or [])
+        if str(document).strip()
+    ]
+
+    if documents_nettoyes:
+        return _executer_summarize_document_complet(
+            contexte=contexte,
+            objectif=objectif_nettoye,
+            format_resume=format,
+            documents=documents_nettoyes,
+        )
+
+    # --- Cas B : résumé des sources déjà disponibles dans le contexte -----
 
     if not contexte.sources:
         return ResultatOutil.echec(
@@ -379,35 +650,19 @@ def _executer_summarize(
             ),
         )
 
-    if contexte.llm is None:
-        return ResultatOutil.echec(
-            "summarize",
-            "Aucun LLM n'est disponible dans le contexte d'exécution.",
-        )
-
-    objectif_nettoye = None
-
-    if objectif:
-        objectif_nettoye = " ".join(
-            str(objectif).split()
-        )
-
     try:
         sources_a_resumer = _filtrer_sources_documents(
-        contexte.sources,
-        documents,
-)
+            contexte.sources,
+            documents,
+        )
         if not sources_a_resumer:
             return ResultatOutil.echec(
-        "summarize",
-        (
-            "Aucune source disponible ne correspond au document "
-            "demandé."
-        ),
-    )
+                "summarize",
+                "Aucune source disponible ne correspond au document demandé.",
+            )
         contexte_documentaire, sources_incluses = _construire_contexte(
-    sources_a_resumer
-)
+            sources_a_resumer
+        )
     except ValueError as exc:
         return ResultatOutil.echec(
             "summarize",
@@ -447,6 +702,9 @@ def _executer_summarize(
         citations_autorisees=citations_autorisees,
     )
 
+    if not citations_valides:
+        return _resultat_sans_provenance(resume, citations_invalides)
+
     avertissements: list[str] = []
 
     if citations_invalides:
@@ -454,11 +712,6 @@ def _executer_summarize(
             "Le LLM a utilisé des citations inconnues : "
             + ", ".join(citations_invalides)
             + "."
-        )
-
-    if not citations_valides:
-        avertissements.append(
-            "Le résumé ne contient aucune citation documentaire valide."
         )
 
     # On rattache uniquement les sources réellement citées.
@@ -488,6 +741,200 @@ def _executer_summarize(
 
 
 # ===========================================================================
+# 5bis. Cas A : résumé hiérarchique d'un document complet
+# ===========================================================================
+
+
+def _synthetiser(
+    textes: list[str],
+    *,
+    objectif: str | None,
+    format_resume: str,
+    contexte: ContexteOutil,
+    profondeur: int = 0,
+) -> str:
+    """
+    Réduit une liste de résumés partiels (étape reduce du map-reduce).
+
+    Un seul appel LLM si leur concaténation tient dans le budget d'un
+    prompt. Sinon, les regroupe d'abord en lots (`_partitionner`, sans
+    jamais en abandonner un) et réduit chaque lot en un méta-résumé avant de
+    récurser sur ces méta-résumés — une réduction hiérarchique bornée par
+    `_PROFONDEUR_MAX_SYNTHESE`, pas une récursion non bornée.
+    """
+
+    if len(textes) == 1:
+        return textes[0]
+
+    taille_totale = sum(len(texte) + 8 for texte in textes)
+
+    if taille_totale <= LIMITE_CARACTERES_LOT or profondeur >= _PROFONDEUR_MAX_SYNTHESE:
+        if taille_totale > LIMITE_CARACTERES_LOT:
+            logger.warning(
+                "Synthèse forcée en un seul appel au-delà de la profondeur "
+                "maximale (%d résumés partiels, %d caractères cumulés) : "
+                "un document exceptionnellement fragmenté peut dépasser la "
+                "fenêtre de contexte du LLM.",
+                len(textes),
+                taille_totale,
+            )
+        return invoquer_llm(
+            contexte.llm,
+            systeme=_message_systeme(contexte),
+            utilisateur=_message_utilisateur_synthese(
+                textes, objectif, format_resume
+            ),
+        )
+
+    lots = _partitionner(textes, len, LIMITE_CARACTERES_LOT)
+    meta_resumes = [
+        invoquer_llm(
+            contexte.llm,
+            systeme=_message_systeme(contexte),
+            utilisateur=_message_utilisateur_synthese(lot, objectif, format_resume),
+        )
+        for lot in lots
+    ]
+
+    return _synthetiser(
+        meta_resumes,
+        objectif=objectif,
+        format_resume=format_resume,
+        contexte=contexte,
+        profondeur=profondeur + 1,
+    )
+
+
+def _executer_summarize_document_complet(
+    *,
+    contexte: ContexteOutil,
+    objectif: str | None,
+    format_resume: str,
+    documents: list[str],
+) -> ResultatOutil:
+    """
+    Résume un ou plusieurs documents explicitement nommés, dans leur
+    intégralité — indépendamment de ce qui a pu être retrouvé par un
+    ``search`` précédent (voir le Test 2 de non-dépendance au top-k).
+
+    Chaîne : nom -> `_resoudre_documents` (CatalogueDocuments, existant) ->
+    doc_id -> `charger_document` (Documentary Core, aucune recherche) ->
+    tous les chunks, en ordre -> partitionnement borné en lots -> résumé
+    partiel par lot (map) -> synthèse finale (reduce) -> validation des
+    citations contre les passages réellement chargés.
+    """
+
+    try:
+        doc_ids = _resoudre_documents(documents)
+        passages = _charger_passages_documents(doc_ids)
+    except DocumentInconnu as exc:
+        return ResultatOutil.echec("summarize", str(exc))
+    except CollectionIndisponible as exc:
+        return ResultatOutil.echec("summarize", f"Corpus indisponible : {exc}")
+    except ErreurRecherche as exc:
+        return ResultatOutil.echec(
+            "summarize", f"Résolution du document impossible : {exc}"
+        )
+
+    if not passages:
+        return ResultatOutil.echec(
+            "summarize",
+            "Le document résolu ne contient aucun contenu indexé.",
+        )
+
+    # Citations locales, propres à ce résumé : `passage.citation` (assignée par
+    # `charger_document`) recommence à S1 pour CHAQUE document. En
+    # concaténant plusieurs documents résolus, la réutiliser telle quelle
+    # collisionnerait (S1 de A == S1 de B) et écraserait silencieusement des
+    # sources dans ce dict. On renumérote donc localement, dans l'ordre de
+    # `passages` (ordre de résolution des documents, ordre documentaire au
+    # sein de chacun — voir `_charger_passages_documents`) : unique par
+    # construction, sans jamais toucher `Passage` ni le Core.
+    sources_par_citation = {
+        f"S{index}": _source_depuis_passage(passage)
+        for index, passage in enumerate(passages, start=1)
+    }
+
+    lots = _partitionner(
+        list(sources_par_citation.items()),
+        lambda paire: len(_bloc_source(paire[1], paire[0])),
+        LIMITE_CARACTERES_LOT,
+    )
+
+    resumes_partiels: list[str] = []
+    for numero, lot in enumerate(lots, start=1):
+        contexte_lot = "\n\n---\n\n".join(
+            _bloc_source(source, citation) for citation, source in lot
+        )
+        try:
+            resumes_partiels.append(
+                invoquer_llm(
+                    contexte.llm,
+                    systeme=_message_systeme(contexte),
+                    utilisateur=_message_utilisateur_lot(
+                        contexte_lot, objectif, numero, len(lots)
+                    ),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ResultatOutil.echec(
+                "summarize",
+                f"Résumé du document impossible (lot {numero}/{len(lots)}) : {exc}",
+            )
+
+    try:
+        resume = _synthetiser(
+            resumes_partiels,
+            objectif=objectif,
+            format_resume=format_resume,
+            contexte=contexte,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return ResultatOutil.echec("summarize", f"Synthèse finale impossible : {exc}")
+
+    citations_autorisees = set(sources_par_citation)
+    citations_valides, citations_invalides = _valider_citations(
+        resume=resume,
+        citations_autorisees=citations_autorisees,
+    )
+
+    if not citations_valides:
+        return _resultat_sans_provenance(resume, citations_invalides)
+
+    avertissements: list[str] = []
+
+    if citations_invalides:
+        avertissements.append(
+            "Le LLM a utilisé des citations inconnues : "
+            + ", ".join(citations_invalides)
+            + "."
+        )
+
+    sources_utilisees = [
+        sources_par_citation[citation] for citation in citations_valides
+    ]
+
+    return ResultatOutil(
+        outil="summarize",
+        succes=True,
+        message=(
+            f"Résumé produit à partir du document complet "
+            f"({len(passages)} passage(s), {len(lots)} lot(s))."
+        ),
+        donnees={
+            "resume": resume,
+            "objectif": objectif,
+            "format": format_resume,
+            "nombre_sources_disponibles": len(passages),
+            "nombre_lots": len(lots),
+            "citations_valides": citations_valides,
+        },
+        sources=sources_utilisees,
+        avertissements=avertissements,
+    )
+
+
+# ===========================================================================
 # 6. Définition enregistrée
 # ===========================================================================
 
@@ -499,12 +946,17 @@ def definir_summarize() -> DefinitionOutil:
     return DefinitionOutil(
         nom="summarize",
         description=(
-            "Résume les passages documentaires déjà récupérés. "
-            "Utilise cet outil après search lorsque l'utilisateur demande "
-            "une synthèse, un résumé, les points essentiels ou une vue "
-            "d'ensemble des informations trouvées. "
-            "Cet outil ne réalise aucune nouvelle recherche documentaire. "
-            "Si aucune source n'est disponible, utilise d'abord search."
+            "Résume des documents documentaires. Deux usages : "
+            "(1) un document explicitement nommé (paramètre 'documents') est "
+            "résumé dans son intégralité, indépendamment de ce qu'un search "
+            "précédent a retrouvé ; "
+            "(2) sans document nommé, résume les passages déjà récupérés par "
+            "un search précédent. "
+            "Cet outil ne réalise aucune recherche sémantique nouvelle : la "
+            "résolution d'un document nommé passe uniquement par son "
+            "identité, pas par une recherche de contenu. "
+            "Si aucun document n'est nommé et qu'aucune source n'est "
+            "disponible, utilise d'abord search."
         ),
         schema_arguments=ArgumentsSummarize,
         fonction=_executer_summarize,

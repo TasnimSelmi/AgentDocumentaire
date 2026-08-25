@@ -23,7 +23,7 @@ from src.agent.graph import construire_graphe
 from src.agent.graph_state import EtatGraphe
 from src.agent.session import construire_session
 from src.rag.generation import ReponseRAG
-from src.rag.retrieval import Passage, RapportRecherche
+from src.rag.retrieval import Passage, PerimetreDocumentaire, RapportRecherche
 from src.tools.base import DefinitionOutil, ResultatOutil, SourceOutil
 
 _SCORE_EVIDENCE_FORTE = 0.90
@@ -138,6 +138,33 @@ def _outil_search_sequence(
 def _outil_search(score: float | None):
     fabrique, _ = _outil_search_sequence([score])
     return fabrique()
+
+
+class _ArgsSummarizeFactice(BaseModel):
+    objectif: str | None = Field(default=None)
+    documents: list[str] | None = Field(default=None)
+    format: str = Field(default="court")
+
+
+def _outil_summarize_capture(
+    resultat: ResultatOutil,
+) -> tuple[Callable[[], DefinitionOutil], list[dict[str, Any]]]:
+    """Fabrique factice de `summarize` qui enregistre les arguments reçus."""
+    appels: list[dict[str, Any]] = []
+
+    def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        appels.append(kw)
+        return resultat
+
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="summarize",
+            description="Summarize factice.",
+            schema_arguments=_ArgsSummarizeFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique, appels
 
 
 class _LLMNonSollicite:
@@ -350,3 +377,257 @@ def test_double_retrieval_ne_se_reproduit_plus(monkeypatch):
 
     assert compteur_recherche[0] == session.etat.tentatives == 1
     assert len(appels_generation) == 1
+
+
+# ===========================================================================
+# Action 03B — routage SEARCH vs SUMMARIZE (détecter_intention)
+# ===========================================================================
+
+
+def test_A_routage_qa_reste_search(monkeypatch):
+    """Une question factuelle continue de suivre la boucle QA existante."""
+    appels_generation = _fabrique_generation_factice(monkeypatch)
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_summarize = ResultatOutil(
+        outil="summarize", succes=True, message="Ne devrait jamais être appelé."
+    )
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_summarize)
+    llm = _LLMScripte(verdicts_suffisance=['{"suffisant": true, "raison": "ok"}'])
+
+    session = construire_session(
+        "Who is the CEO of company X?",
+        llm=llm,
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    reponse = _invoquer(session)
+
+    assert isinstance(reponse, ReponseRAG)
+    assert compteur_recherche[0] == 1
+    assert appels_summarize == []
+    etapes_intention = [e for e in session.etat.trace if e.nom == "intention"]
+    assert len(etapes_intention) == 1
+    assert etapes_intention[0].donnees["intention"] == "search"
+
+
+def test_B_routage_resume_francais(monkeypatch):
+    """« Résume le rapport CNIL 2023. » route vers SUMMARIZE."""
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_summarize = ResultatOutil(
+        outil="summarize",
+        succes=True,
+        message="Résumé produit à partir du document complet (199 passage(s)).",
+        donnees={"resume": "Le rapport CNIL 2023 couvre..."},
+    )
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_summarize)
+
+    session = construire_session(
+        "Résume le rapport CNIL 2023.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_summarize
+    assert compteur_recherche[0] == 0
+    assert len(appels_summarize) == 1
+    assert appels_summarize[0]["documents"] == ["cnil-44e-rapport-annuel-2023.pdf"]
+
+
+def test_C_routage_resume_anglais(monkeypatch):
+    """« Summarize the CNIL annual report. » route aussi vers SUMMARIZE."""
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_summarize = ResultatOutil(
+        outil="summarize", succes=True, message="Résumé produit.", donnees={"resume": "..."}
+    )
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_summarize)
+
+    session = construire_session(
+        "Summarize the CNIL annual report.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_summarize
+    assert compteur_recherche[0] == 0
+    assert len(appels_summarize) == 1
+
+
+def test_D_summarize_appele_une_fois_search_jamais(monkeypatch):
+    """Pour SUMMARIZE : summarize appelé exactement une fois, search jamais."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_summarize = ResultatOutil(outil="summarize", succes=True, message="ok")
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_summarize)
+
+    session = construire_session(
+        "Fais-moi une synthèse du document A.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    _invoquer(session)
+
+    assert len(appels_summarize) == 1
+    assert compteur_recherche[0] == 0
+    assert session.outils_utilises() == ["summarize"]
+
+
+def test_E_documents_transmis_au_tool(monkeypatch):
+    """La désignation résolue arrive correctement dans documents=[...]."""
+    perimetre = PerimetreDocumentaire(
+        statut="compatible",
+        valeurs_filtre=("doc-a", "doc-b"),
+        libelles=("Rapport A", "Rapport B"),
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_summarize = ResultatOutil(outil="summarize", succes=True, message="ok")
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_summarize)
+
+    session = construire_session(
+        "Résume les rapports A et B en mettant l'accent sur les engagements climatiques.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    _invoquer(session)
+
+    assert appels_summarize[0]["documents"] == ["doc-a", "doc-b"]
+    assert "climatiques" in appels_summarize[0]["objectif"]
+
+
+def test_F_succes_devient_la_reponse_finale(monkeypatch):
+    """`ResultatOutil.succes=True` -> réponse finale de l'agent correctement remplie."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_summarize = ResultatOutil(
+        outil="summarize",
+        succes=True,
+        message="Résumé produit.",
+        donnees={"resume": "Contenu du résumé.", "citations_valides": ["S1", "S2"]},
+        sources=[SourceOutil(doc_id="doc-a", source="a.pdf", nom_fichier="a.pdf", page=1, extrait="x")],
+    )
+    fabrique_summarize, _ = _outil_summarize_capture(resultat_summarize)
+
+    session = construire_session(
+        "Résume le document A.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    reponse = _invoquer(session)
+
+    assert isinstance(reponse, ResultatOutil)
+    assert reponse.succes is True
+    assert reponse.donnees["resume"] == "Contenu du résumé."
+    assert len(reponse.sources) == 1
+
+
+def test_G_echec_tool_termine_proprement_sans_boucle_qa(monkeypatch):
+    """`succes=False` -> le graphe termine proprement, sans crash ni boucle QA."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-x",), libelles=("Doc X",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_echec = ResultatOutil(
+        outil="summarize", succes=False, message="Document inconnu dans la collection."
+    )
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_echec)
+    llm = _LLMNonSollicite()
+
+    session = construire_session(
+        "Résume le document X.",
+        llm=llm,
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_echec
+    assert reponse.succes is False
+    assert "Document inconnu" in reponse.message
+    assert compteur_recherche[0] == 0  # aucune boucle QA déclenchée
+    assert len(appels_summarize) == 1  # pas de retry
+
+
+def test_H_sans_document_explicite_reutilise_le_contexte_existant(monkeypatch):
+    """
+    « Résume les éléments trouvés. » (pas de document nommé) : documents=None,
+    cohérent avec le mode historique de summarize (résume ContexteOutil.sources).
+    """
+    perimetre = PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance")
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_summarize = ResultatOutil(
+        outil="summarize", succes=True, message="Résumé produit à partir du contexte existant."
+    )
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_summarize)
+
+    session = construire_session(
+        "Résume les éléments trouvés.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    # Simule un `search` déjà exécuté plus tôt dans la même session.
+    session.contexte.sources.append(
+        SourceOutil(doc_id="d1", source="doc.pdf", nom_fichier="doc.pdf", page=1, extrait="Extrait.")
+    )
+
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_summarize
+    assert appels_summarize[0]["documents"] is None
+    assert compteur_recherche[0] == 0
+
+
+def test_I_ambiguite_documentaire_conserve_le_refus(monkeypatch):
+    """
+    Désignation ambiguë : le refus de `summarize` est conservé tel quel, sans
+    document choisi arbitrairement et sans bascule silencieuse vers search.
+    """
+    perimetre = PerimetreDocumentaire(
+        statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_echec = ResultatOutil(
+        outil="summarize",
+        succes=False,
+        message="Aucune source documentaire n'est disponible. Utilise d'abord l'outil search.",
+    )
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_echec)
+
+    session = construire_session(
+        "Résume le rapport.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_echec
+    assert reponse.succes is False
+    assert appels_summarize[0]["documents"] is None
+    assert compteur_recherche[0] == 0

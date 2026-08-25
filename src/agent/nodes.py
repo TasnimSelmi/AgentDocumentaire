@@ -19,7 +19,9 @@ lisible et testable indépendamment de l'exécution du graphe.
 from __future__ import annotations
 
 import logging
+import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 
 from src.agent.graph_state import EtatGraphe
@@ -27,6 +29,7 @@ from src.agent.session import SessionAgent
 from src.config import get_profil
 from src.llm.common import extraire_json_objet, invoquer_llm
 from src.rag.generation import ReponseRAG, generer_depuis_recherche, refuser_sans_generation
+from src.rag.retrieval import resoudre_document
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +201,57 @@ def _juger_suffisance(llm, question: str, passages: list) -> VerdictSuffisance:
         )
 
 
+# ===========================================================================
+# Détection d'intention (Action 03B) : SEARCH vs SUMMARIZE
+# ===========================================================================
+#
+# Vocabulaire fermé, générique et bilingue (FR/EN) : signale une INTENTION de
+# résumé documentaire, jamais un domaine métier ni un corpus particulier.
+# Choisi plutôt qu'un classifieur LLM parce que la distinction SEARCH vs
+# SUMMARIZE ne demande aucune nuance sémantique (contrairement au jugement de
+# suffisance, niveau 2 de la boucle QA, qui en a réellement besoin) : un
+# répertoire de verbes suffit, et reste déterministe, sans latence LLM, sans
+# mode d'échec réseau — cohérent avec le niveau 1 (pertinence) de la boucle
+# QA existante, également déterministe. Par défaut (aucun déclencheur
+# trouvé), SEARCH : repli sûr vers le chemin existant et déjà validé.
+_MOTIF_MOTS_INTENTION = re.compile(r"[a-z0-9]+")
+
+_JETONS_SUMMARIZE = {
+    # français — accents déjà retirés par _normaliser_intention
+    "resume", "resumer", "resumes", "resumee", "resumees",
+    "synthese", "syntheses", "synthetise", "synthetiser",
+    "sommaire",
+    # anglais
+    "summarize", "summarise", "summary", "summaries",
+    "summarizing", "summarising", "tldr",
+}
+_BIGRAMMES_SUMMARIZE = ("points cles", "key points", "en bref", "in short")
+
+
+def _normaliser_intention(texte: str) -> str:
+    """Minuscule, sans accents — utilitaire local, l'agent ne dépend pas des
+    fonctions privées du Core (`retrieval._normaliser_texte`)."""
+    brut = unicodedata.normalize("NFKD", str(texte))
+    brut = "".join(caractere for caractere in brut if not unicodedata.combining(caractere))
+    return brut.lower()
+
+
+def _detecter_intention(requete: str) -> str:
+    """
+    Classifie une requête en ``"search"`` ou ``"summarize"``.
+
+    Déterministe, bornée, testable indépendamment du graphe et du corpus.
+    """
+    normalisee = _normaliser_intention(requete)
+    jetons = set(_MOTIF_MOTS_INTENTION.findall(normalisee))
+
+    if jetons & _JETONS_SUMMARIZE:
+        return "summarize"
+    if any(bigramme in normalisee for bigramme in _BIGRAMMES_SUMMARIZE):
+        return "summarize"
+    return "search"
+
+
 def _stagnation(session: SessionAgent, score_maximal: float) -> bool:
     """
     Vrai si le score de pertinence n'a pas bougé depuis la tentative
@@ -218,6 +272,90 @@ def _stagnation(session: SessionAgent, score_maximal: float) -> bool:
 # ===========================================================================
 # Nœuds
 # ===========================================================================
+
+
+def noeud_detecter_intention(etat: EtatGraphe) -> dict:
+    """Premier nœud du graphe (Action 03B) : SEARCH ou SUMMARIZE."""
+    session = etat.session
+    intention = _detecter_intention(session.etat.requete_courante)
+
+    session.etat.ajouter_trace(
+        "intention",
+        f"Intention détectée : {intention}.",
+        intention=intention,
+    )
+
+    return {"session": session, "intention": intention}
+
+
+def router_intention(etat: EtatGraphe) -> str:
+    """
+    Arête conditionnelle après `detecter_intention`.
+
+    Lit `etat.intention`, déjà calculé et journalisé par
+    `noeud_detecter_intention`, comme `router_apres_evaluation` le fait pour
+    ses propres champs : le routage ne doit jamais diverger de ce que dit la
+    trace.
+    """
+    return "summarize" if etat.intention == "summarize" else "rechercher"
+
+
+def noeud_summarize(etat: EtatGraphe) -> dict:
+    """
+    Exécute l'outil `summarize` via le registre (Action 03B), exactement
+    comme `noeud_rechercher` le fait pour `search` : aucun appel direct à
+    une fonction interne du tool.
+
+    Désignation du document : `summarize(documents=...)` attend des
+    identifiants déjà précis (`CatalogueDocuments.perimetre_explicite`), pas
+    du texte libre. La requête est donc d'abord passée à
+    `resoudre_document` — résolution floue déjà publique et déjà utilisée en
+    interne par `search`/`rechercher_passages`, explicitement documentée
+    comme « réutilisable par l'agent » (`src/rag/retrieval.py`) — pour en
+    extraire, si possible, un ou plusieurs identifiants fiables. Aucune
+    logique de résolution n'est réimplémentée ici.
+
+    Si aucun document n'est identifié de façon fiable (périmètre non
+    contraignant, ou résolution en échec technique), `documents` reste
+    `None` : `summarize` retombe alors sur son mode historique (résumé des
+    sources déjà accumulées dans `ContexteOutil`, ou échec explicite s'il
+    n'y en a aucune) — jamais de repli silencieux vers `search`, jamais de
+    document choisi arbitrairement.
+
+    Pas de boucle de récupération pour un échec de `summarize` dans cette
+    action : succès ou échec, le `ResultatOutil` devient directement la
+    réponse finale du graphe.
+    """
+    session = etat.session
+    requete = session.etat.requete_courante
+
+    documents: list[str] | None = None
+    statut_resolution = "non_tente"
+
+    try:
+        perimetre = resoudre_document(requete)
+        statut_resolution = perimetre.statut
+        if perimetre.contraignant:
+            documents = list(perimetre.valeurs_filtre)
+    except Exception as exc:  # noqa: BLE001 — la résolution ne doit jamais casser le graphe
+        logger.warning("Résolution documentaire pour summarize impossible : %s", exc)
+        statut_resolution = "erreur"
+
+    resultat = session.executer_outil(
+        "summarize",
+        objectif=requete,
+        documents=documents,
+    )
+
+    session.etat.ajouter_trace(
+        "summarize",
+        "Résumé produit." if resultat.succes else "Résumé impossible.",
+        succes=resultat.succes,
+        documents_demandes=documents,
+        resolution_documentaire=statut_resolution,
+    )
+
+    return {"session": session, "reponse": resultat}
 
 
 def noeud_rechercher(etat: EtatGraphe) -> dict:
@@ -518,6 +656,9 @@ def _refuser(
 
 
 __all__ = [
+    "noeud_detecter_intention",
+    "router_intention",
+    "noeud_summarize",
     "noeud_rechercher",
     "noeud_evaluer_preuves",
     "router_apres_evaluation",
