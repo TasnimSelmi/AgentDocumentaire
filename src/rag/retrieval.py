@@ -57,6 +57,7 @@ from src.rag.vectorstore import (
     construire_filtre,
     fermer_client,
     info_collection,
+    parcourir_tout,
     rechercher,
     recuperer_contexte,
 )
@@ -1327,6 +1328,93 @@ def _passage_depuis_resultat(
         score_reranking=score_reranking,
         payload=payload,
     )
+
+
+# ===========================================================================
+# Lecture documentaire complète (primitive, sans recherche)
+# ===========================================================================
+
+
+def _trier_par_ordre_documentaire(
+    resultats: list[Resultat], doc_id: str
+) -> list[Resultat]:
+    """
+    Trie les chunks d'un document dans leur ordre de lecture original.
+
+    ``chunk_index`` est un compteur unique attribué à tout le document par
+    ``chunking.decouper()`` (toutes pages confondues, voir son compteur
+    global) : il suffit donc seul à reconstruire l'ordre, sans dépendre de
+    l'ordre — non garanti — dans lequel Qdrant restitue les points d'un
+    scroll.
+
+    ``chunk_index`` est un champ obligatoire de ``ChunkIndexable`` : son
+    absence signale une incohérence d'ingestion, pas un cas normal. Un tel
+    chunk n'est jamais masqué silencieusement ; il est relégué en fin de
+    liste (ordre stable par ``point_id``) et signalé par un avertissement.
+    """
+    avec_index: list[Resultat] = []
+    sans_index: list[Resultat] = []
+    for resultat in resultats:
+        valeur = resultat.payload.get("chunk_index")
+        (avec_index if isinstance(valeur, int) else sans_index).append(resultat)
+
+    if sans_index:
+        logger.warning(
+            "%d chunk(s) du document %r sans chunk_index exploitable : "
+            "placés en fin de liste, ordre non garanti pour eux.",
+            len(sans_index),
+            doc_id,
+        )
+
+    avec_index.sort(key=lambda r: r.payload["chunk_index"])
+    sans_index.sort(key=lambda r: r.point_id)
+    return avec_index + sans_index
+
+
+def charger_document(doc_id: str) -> list[Passage]:
+    """
+    Charge l'intégralité des chunks d'un document déjà indexé.
+
+    Primitive de lecture documentaire, distincte de ``rechercher_passages`` :
+    aucune recherche sémantique, aucun reranking, aucune dépendance à une
+    requête utilisateur. Elle lit exhaustivement (pagination Qdrant complète
+    via ``vectorstore.parcourir_tout``) tous les points portant ce ``doc_id``
+    exact, puis les restitue dans leur ordre documentaire d'origine (voir
+    ``_trier_par_ordre_documentaire``).
+
+    ``doc_id`` doit être l'identifiant stable déjà connu (par exemple obtenu
+    via ``catalogue().par_identifiant(...)``), pas un nom approximatif :
+    cette fonction ne fait aucune résolution floue — cela reste le rôle de
+    ``CatalogueDocuments``, volontairement non dupliqué ici.
+
+    Lève :
+        - ``CollectionIndisponible`` si la collection Qdrant n'existe pas ;
+        - ``DocumentInconnu`` si aucun chunk ne porte ce ``doc_id`` — que le
+          document n'ait jamais existé ou qu'il ait été retiré de l'index
+          (``vectorstore.supprimer_document``) ; les deux cas sont
+          indiscernables du point de vue de cette primitive et traités de
+          façon identique.
+    """
+    doc_id = str(doc_id).strip()
+    if not doc_id:
+        raise DocumentInconnu("doc_id vide.")
+
+    infos = info_collection()
+    if not infos.get("existe"):
+        raise CollectionIndisponible(
+            "La collection Qdrant n'existe pas. Lance d'abord l'ingestion."
+        )
+
+    resultats = parcourir_tout(construire_filtre({"doc_id": doc_id}))
+    if not resultats:
+        raise DocumentInconnu(f"Document inconnu dans la collection : {doc_id!r}.")
+
+    resultats = _trier_par_ordre_documentaire(resultats, doc_id)
+
+    return [
+        _passage_depuis_resultat(resultat, rang, score_reranking=None)
+        for rang, resultat in enumerate(resultats, start=1)
+    ]
 
 
 def _selectionner_diversifie(

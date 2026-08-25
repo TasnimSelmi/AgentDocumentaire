@@ -561,6 +561,54 @@ def lister_documents(
     return list(documents.values())
 
 
+def parcourir_tout(
+    filtre: models.Filter | None,
+    *,
+    taille_page: int = 1024,
+) -> list[Resultat]:
+    """
+    Récupère TOUS les points correspondant à un filtre, sans vecteur.
+
+    Contrairement à ``parcourir()``, borné par ``limite`` (utile pour un
+    aperçu ou un voisinage volontairement plafonné), cette fonction épuise
+    toutes les pages du scroll Qdrant : un document dont le nombre de chunks
+    dépasse une seule page n'en perd donc silencieusement aucun. Réservée à
+    la lecture intégrale d'un document (voir ``retrieval.charger_document``) ;
+    ``parcourir()`` reste inchangée pour ses appelants existants.
+    """
+    if taille_page < 1:
+        raise ValueError("taille_page doit être supérieure ou égale à 1.")
+
+    client = get_client()
+    nom_collection = get_config_technique().qdrant.nom_collection
+
+    resultats: list[Resultat] = []
+    decalage: Any = None
+
+    while True:
+        points, decalage = client.scroll(
+            collection_name=nom_collection,
+            scroll_filter=filtre,
+            limit=taille_page,
+            offset=decalage,
+            with_payload=True,
+            with_vectors=False,
+        )
+        resultats.extend(
+            Resultat(
+                point_id=str(p.id),
+                score=0.0,
+                texte=(p.payload or {}).get("texte", ""),
+                payload=p.payload or {},
+            )
+            for p in points
+        )
+        if not points or decalage is None:
+            break
+
+    return resultats
+
+
 def compter(filtre: models.Filter | None = None) -> int:
     client = get_client()
     return client.count(
