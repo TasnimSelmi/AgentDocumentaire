@@ -8,9 +8,12 @@ __pycache__/
 # Secrets
 .env
 
-#data 
+#data
 evaluation/reports/
 profiles/
+
+# Preuves privées locales (jamais commitées)
+private_artifacts/
 #claude
 .claude/
 # Données et index

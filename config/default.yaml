@@ -71,7 +71,7 @@ recherche:
   score_min: 0.30
 
 qdrant:
-  nom_collection: financial_reports
+  nom_collection: french_corpus_demo
   distance: cosine
   taille_vecteur_dense: 1024 # BGE-M3
   sparse_active: true
