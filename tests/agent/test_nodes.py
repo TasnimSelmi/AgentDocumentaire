@@ -396,6 +396,291 @@ def test_noeud_summarize_resolution_en_echec_ne_casse_pas_le_graphe(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# _detecter_intention (extension CLASSIFY) / _desambiguiser_intention_classify
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "requete,attendu",
+    [
+        ("Classe ce document.", "classify"),
+        ("Classe le rapport CNIL 2023.", "classify"),
+        ("Classify this document.", "classify"),
+        ("Categorize the CNIL report.", "classify"),
+        ("Peux-tu classifier ce rapport ?", "classify"),
+        # Zone grise : nom seul, résolue par le classifieur LLM borné, pas ici.
+        ("Quelle catégorie correspond à ce rapport ?", "ambigu_classify"),
+        ("Quelle est la classification de risque mentionnée dans ce document ?", "ambigu_classify"),
+        ("What is the classification mentioned in this document?", "ambigu_classify"),
+    ],
+)
+def test_detecter_intention_classify(requete: str, attendu: str) -> None:
+    assert nodes._detecter_intention(requete) == attendu
+
+
+class _LLMDesambiguisation:
+    def __init__(self, intention: str) -> None:
+        self._intention = intention
+
+    def invoke(self, messages: Any) -> AIMessage:
+        return AIMessage(content=f'{{"intention": "{self._intention}"}}')
+
+
+def test_desambiguiser_intention_classify_retourne_classify() -> None:
+    llm = _LLMDesambiguisation("CLASSIFY")
+    assert nodes._desambiguiser_intention_classify(llm, "Quelle catégorie correspond à ce rapport ?") == "classify"
+
+
+def test_desambiguiser_intention_classify_retourne_search_par_defaut() -> None:
+    llm = _LLMDesambiguisation("SEARCH")
+    assert nodes._desambiguiser_intention_classify(llm, "Quelle classification de risque est mentionnée ?") == "search"
+
+
+def test_desambiguiser_intention_classify_repli_sur_erreur_llm() -> None:
+    class _LLMExplose:
+        def invoke(self, messages):
+            raise RuntimeError("Ollama injoignable.")
+
+    assert nodes._desambiguiser_intention_classify(_LLMExplose(), "peu importe") == "search"
+
+
+def test_router_intention_route_vers_classify() -> None:
+    session = _session_factice(fabriques=[_outil_search_evidence_forte])
+    assert nodes.router_intention(EtatGraphe(session=session, intention="classify")) == "classify"
+
+
+# ---------------------------------------------------------------------------
+# noeud_classify
+# ---------------------------------------------------------------------------
+
+
+class _ArgsClassifyFactice(BaseModel):
+    categories: list[str] = Field(default_factory=list)
+    document: str | None = Field(default=None)
+    critere: str | None = Field(default=None)
+    instruction: str | None = Field(default=None)
+
+
+def _outil_classify_capture(
+    resultat: ResultatOutil,
+) -> tuple[Callable[[], DefinitionOutil], list[dict[str, Any]]]:
+    appels: list[dict[str, Any]] = []
+
+    def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        appels.append(kw)
+        return resultat
+
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="classify",
+            description="Classify factice.",
+            schema_arguments=_ArgsClassifyFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique, appels
+
+
+def _outil_search_avec_compteur(
+    score: float | None,
+) -> tuple[Callable[[], DefinitionOutil], list[int]]:
+    """Comme `_outil_search_sequence`, mais renvoie aussi un compteur d'appels."""
+    compteur: list[int] = [0]
+
+    def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        compteur[0] += 1
+        rapport = _un_rapport([] if score is None else [_un_passage(score)])
+        if contexte is not None:
+            contexte.dernier_rapport_recherche = rapport
+        if score is None:
+            return ResultatOutil(outil="search", succes=True, message="Rien trouvé.")
+        return ResultatOutil(
+            outil="search", succes=True, message="1 passage trouvé.", sources=[_une_source(score)]
+        )
+
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="search",
+            description="Search factice à compteur.",
+            schema_arguments=_ArgsSearchFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique, compteur
+
+
+def test_noeud_classify_document_resolu_utilise_mode_document_complet_sans_search(monkeypatch) -> None:
+    """
+    Périmètre résolu de façon non ambiguë (un seul document) : classify passe
+    en mode document complet (Option E — voir `src.tools.classify`) et
+    n'exécute plus aucun search interne, contrairement à l'ancien
+    comportement (top-k) que cette mission remplace pour ce cas précis.
+    """
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Classe le rapport CNIL 2023.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_classify(etat)
+
+    assert appels_classify[0]["documents"] == ["cnil-44e-rapport-annuel-2023.pdf"]
+    assert "document" not in appels_classify[0]
+    assert appels_classify[0]["categories"]  # non vide, vient du profil technique
+    assert mise_a_jour["reponse"] is resultat_classify
+    # Document résolu de façon fiable : plus besoin d'un search interne.
+    assert compteur_recherche[0] == 0
+
+
+def test_noeud_classify_ne_relance_pas_search_si_sources_deja_presentes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+    )
+
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Classe ce document.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    session.contexte.sources.append(_une_source(0.9))
+    etat = EtatGraphe(session=session)
+
+    nodes.noeud_classify(etat)
+
+    assert compteur_recherche[0] == 0
+    assert appels_classify[0]["document"] is None
+
+
+def test_noeud_classify_document_non_ambigu_refuse_sans_appeler_loutil(monkeypatch) -> None:
+    """
+    Périmètre 'compatible' à plusieurs valeurs : la requête vise
+    explicitement un document, mais la résolution ne peut pas trancher entre
+    plusieurs candidats également valables. `classify` n'est PAS appelé (le
+    refus est construit directement par le nœud, aucun choix implicite), et
+    aucun `search` de repli n'est déclenché.
+    """
+    perimetre = PerimetreDocumentaire(
+        statut="compatible", valeurs_filtre=("doc-a", "doc-b"), libelles=("Doc A", "Doc B")
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Classe les rapports A et B.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_classify(etat)
+
+    assert appels_classify == []
+    assert compteur_recherche[0] == 0
+    assert mise_a_jour["reponse"].succes is False
+    assert "Doc A" in mise_a_jour["reponse"].message and "Doc B" in mise_a_jour["reponse"].message
+
+
+def test_noeud_classify_document_ambigu_refuse_sans_search(monkeypatch) -> None:
+    """Périmètre 'ambigu' (candidats trop proches) : refus propre, aucun search."""
+    perimetre = PerimetreDocumentaire(
+        statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Classe le rapport.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_classify(etat)
+
+    assert appels_classify == []
+    assert compteur_recherche[0] == 0
+    assert mise_a_jour["reponse"].succes is False
+
+
+def test_noeud_classify_document_introuvable_refuse_sans_search(monkeypatch) -> None:
+    """
+    Correspondance détectée mais sous le seuil de résolution
+    (`raison="score_insuffisant"`) : la requête semble viser un document
+    précis (introuvable de façon fiable), refus propre, aucun search de
+    repli — distinct du cas où aucune référence documentaire n'est présente
+    du tout (voir `test_noeud_classify_ne_relance_pas_search_si_sources_deja_presentes`).
+    """
+    perimetre = PerimetreDocumentaire(statut="aucun", raison="score_insuffisant", score=0.05)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Classe le rapport Inexistant-XYZ.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_classify(etat)
+
+    assert appels_classify == []
+    assert compteur_recherche[0] == 0
+    assert mise_a_jour["reponse"].succes is False
+
+
+def test_noeud_classify_passe_par_le_registre_et_journalise(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+    )
+
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
+    fabrique_classify, _ = _outil_classify_capture(resultat_classify)
+    fabrique_search, _ = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Classe ce document.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    etat = EtatGraphe(session=session)
+
+    nodes.noeud_classify(etat)
+
+    assert session.contexte.resultats[-1].outil == "classify"
+    assert session.etat.trace[-1].nom == "classify"
+    assert session.etat.trace[-1].donnees["succes"] is True
+
+
+# ---------------------------------------------------------------------------
 # noeud_rechercher
 # ---------------------------------------------------------------------------
 

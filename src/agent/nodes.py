@@ -30,6 +30,7 @@ from src.config import get_profil
 from src.llm.common import extraire_json_objet, invoquer_llm
 from src.rag.generation import ReponseRAG, generer_depuis_recherche, refuser_sans_generation
 from src.rag.retrieval import resoudre_document
+from src.tools.base import ResultatOutil
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,49 @@ _JETONS_SUMMARIZE = {
 }
 _BIGRAMMES_SUMMARIZE = ("points cles", "key points", "en bref", "in short")
 
+# CLASSIFY (cette action) : uniquement des formes VERBALES d'action, jamais
+# le nom "catégorie"/"classification" seul — voir _JETONS_CLASSIFY_AMBIGUS
+# ci-dessous pour la raison. "classe" est ambigu (nom commun ou impératif de
+# "classer") : n'est retenu que si c'est le premier mot de la requête,
+# approximation simple d'un impératif ("Classe ce document." vs "Quelle
+# classe de risque ?").
+_JETONS_CLASSIFY_SURS = {
+    "classifie", "classifier", "classifions", "classifiez", "classifient",
+    "classify", "classifies", "classifying",
+    "categorize", "categorizes", "categorizing",
+    "categorise", "categorises", "categorising",
+}
+_MOT_CLASSIFY_IMPERATIF = "classe"
+
+# "catégorie" et "classification" sont de purs noms : ils peuvent aussi bien
+# désigner une DEMANDE de classement du document ("Quelle catégorie
+# correspond à ce rapport ?") qu'un FAIT mentionné dans son contenu
+# ("Quelle est la classification de risque mentionnée dans ce document ?").
+# Cette distinction dépend de la structure de la phrase, pas du vocabulaire :
+# aucune heuristique lexicale fermée ne peut la trancher de façon fiable.
+# `_detecter_intention` renvoie donc un sentinel dédié pour ce cas précis, et
+# `noeud_detecter_intention` le résout par un classifieur LLM borné (voir
+# `_desambiguiser_intention_classify`) — jamais par un mot-clé supplémentaire
+# qui recréerait le même risque de faux positif.
+_JETONS_CLASSIFY_AMBIGUS = {"categorie", "classification", "categorisation"}
+
+_AMBIGU_CLASSIFY = "ambigu_classify"
+
+_SYSTEME_DESAMBIGUISATION_CLASSIFY = """Tu distingues deux intentions possibles pour une requête adressée à un agent documentaire.
+
+SEARCH : la requête pose une question factuelle. Cela reste vrai même si la
+question porte sur une catégorie, une classification ou un type mentionné
+DANS le contenu d'un document (ex. « Quelle est la classification de risque
+mentionnée dans ce document ? » — on demande un FAIT présent dans le texte).
+
+CLASSIFY : la requête demande explicitement de classer, catégoriser, ou
+déterminer la catégorie/le type DU DOCUMENT LUI-MÊME, parmi des catégories
+prédéfinies (ex. « Quelle catégorie correspond à ce rapport ? »).
+
+Réponds uniquement avec un objet JSON strict :
+{"intention": "SEARCH"|"CLASSIFY"}
+"""
+
 
 def _normaliser_intention(texte: str) -> str:
     """Minuscule, sans accents — utilitaire local, l'agent ne dépend pas des
@@ -238,17 +282,52 @@ def _normaliser_intention(texte: str) -> str:
 
 def _detecter_intention(requete: str) -> str:
     """
-    Classifie une requête en ``"search"`` ou ``"summarize"``.
+    Classifie une requête en ``"search"``, ``"summarize"``, ``"classify"``
+    ou ``"ambigu_classify"`` (zone grise résolue ensuite par
+    `_desambiguiser_intention_classify`, voir `noeud_detecter_intention`).
 
     Déterministe, bornée, testable indépendamment du graphe et du corpus.
     """
     normalisee = _normaliser_intention(requete)
-    jetons = set(_MOTIF_MOTS_INTENTION.findall(normalisee))
+    jetons = _MOTIF_MOTS_INTENTION.findall(normalisee)
+    ensemble_jetons = set(jetons)
 
-    if jetons & _JETONS_SUMMARIZE:
+    if ensemble_jetons & _JETONS_SUMMARIZE:
         return "summarize"
     if any(bigramme in normalisee for bigramme in _BIGRAMMES_SUMMARIZE):
         return "summarize"
+
+    if ensemble_jetons & _JETONS_CLASSIFY_SURS:
+        return "classify"
+    if jetons and jetons[0] == _MOT_CLASSIFY_IMPERATIF:
+        return "classify"
+
+    if ensemble_jetons & _JETONS_CLASSIFY_AMBIGUS:
+        return _AMBIGU_CLASSIFY
+
+    return "search"
+
+
+def _desambiguiser_intention_classify(llm: Any, requete: str) -> str:
+    """
+    Classifieur LLM borné, appelé uniquement pour `_AMBIGU_CLASSIFY` : une
+    seule évaluation, ensemble de sortie fermé ``{"search", "classify"}``,
+    jamais de choix de tool par le LLM lui-même. Toute sortie invalide ou
+    tout échec (LLM indisponible, JSON invalide) retombe sur ``"search"`` —
+    repli sûr vers le chemin existant, jamais l'inverse.
+    """
+    try:
+        texte = invoquer_llm(
+            llm,
+            systeme=_SYSTEME_DESAMBIGUISATION_CLASSIFY,
+            utilisateur=requete,
+        )
+        objet = extraire_json_objet(texte)
+        valeur = str(objet.get("intention", "")).strip().upper()
+        if valeur == "CLASSIFY":
+            return "classify"
+    except Exception as exc:  # noqa: BLE001 — classifieur borné, repli conservateur
+        logger.warning("Désambiguïsation d'intention CLASSIFY impossible : %s", exc)
     return "search"
 
 
@@ -275,14 +354,30 @@ def _stagnation(session: SessionAgent, score_maximal: float) -> bool:
 
 
 def noeud_detecter_intention(etat: EtatGraphe) -> dict:
-    """Premier nœud du graphe (Action 03B) : SEARCH ou SUMMARIZE."""
+    """
+    Premier nœud du graphe : SEARCH, SUMMARIZE ou CLASSIFY (cette action).
+
+    La détection lexicale (`_detecter_intention`) tranche seule dans
+    l'immense majorité des cas, sans LLM. Le seul cas où elle ne peut pas
+    trancher de façon fiable (« catégorie »/« classification » employés comme
+    noms, voir `_JETONS_CLASSIFY_AMBIGUS`) passe par un classifieur LLM borné
+    (`_desambiguiser_intention_classify`) — jamais par un mot-clé
+    supplémentaire, qui reproduirait la même ambiguïté.
+    """
     session = etat.session
-    intention = _detecter_intention(session.etat.requete_courante)
+    requete = session.etat.requete_courante
+
+    intention = _detecter_intention(requete)
+    desambiguisation_llm = intention == _AMBIGU_CLASSIFY
+
+    if desambiguisation_llm:
+        intention = _desambiguiser_intention_classify(session.llm, requete)
 
     session.etat.ajouter_trace(
         "intention",
         f"Intention détectée : {intention}.",
         intention=intention,
+        desambiguisation_llm=desambiguisation_llm,
     )
 
     return {"session": session, "intention": intention}
@@ -295,9 +390,40 @@ def router_intention(etat: EtatGraphe) -> str:
     Lit `etat.intention`, déjà calculé et journalisé par
     `noeud_detecter_intention`, comme `router_apres_evaluation` le fait pour
     ses propres champs : le routage ne doit jamais diverger de ce que dit la
-    trace.
+    trace. Toute valeur inattendue (y compris `None`) route vers l'existant
+    (`rechercher`), le repli sûr.
     """
-    return "summarize" if etat.intention == "summarize" else "rechercher"
+    if etat.intention == "summarize":
+        return "summarize"
+    if etat.intention == "classify":
+        return "classify"
+    return "rechercher"
+
+
+def _resoudre_perimetre_document(requete: str) -> tuple[Any, str]:
+    """
+    Résolution documentaire partagée par `noeud_summarize` et
+    `noeud_classify` : texte libre -> `PerimetreDocumentaire`, via
+    `resoudre_document` — résolution floue déjà publique et déjà utilisée en
+    interne par `search`/`rechercher_passages`, explicitement documentée
+    comme « réutilisable par l'agent » (`src/rag/retrieval.py`). Aucune
+    logique de résolution n'est réimplémentée ici.
+
+    Ne casse jamais le graphe : toute erreur retombe sur l'absence de
+    périmètre (`None`), journalisée comme telle par l'appelant.
+
+    Returns:
+        ``(perimetre, statut)`` — ``perimetre`` est `None` si la résolution
+        a échoué techniquement ; ``statut`` vaut alors ``"erreur"``, sinon
+        `perimetre.statut` (``"exact"``, ``"compatible"``, ``"ambigu"`` ou
+        ``"aucun"``).
+    """
+    try:
+        perimetre = resoudre_document(requete)
+        return perimetre, perimetre.statut
+    except Exception as exc:  # noqa: BLE001 — la résolution ne doit jamais casser le graphe
+        logger.warning("Résolution documentaire impossible : %s", exc)
+        return None, "erreur"
 
 
 def noeud_summarize(etat: EtatGraphe) -> dict:
@@ -308,12 +434,7 @@ def noeud_summarize(etat: EtatGraphe) -> dict:
 
     Désignation du document : `summarize(documents=...)` attend des
     identifiants déjà précis (`CatalogueDocuments.perimetre_explicite`), pas
-    du texte libre. La requête est donc d'abord passée à
-    `resoudre_document` — résolution floue déjà publique et déjà utilisée en
-    interne par `search`/`rechercher_passages`, explicitement documentée
-    comme « réutilisable par l'agent » (`src/rag/retrieval.py`) — pour en
-    extraire, si possible, un ou plusieurs identifiants fiables. Aucune
-    logique de résolution n'est réimplémentée ici.
+    du texte libre — voir `_resoudre_perimetre_document`.
 
     Si aucun document n'est identifié de façon fiable (périmètre non
     contraignant, ou résolution en échec technique), `documents` reste
@@ -329,17 +450,12 @@ def noeud_summarize(etat: EtatGraphe) -> dict:
     session = etat.session
     requete = session.etat.requete_courante
 
-    documents: list[str] | None = None
-    statut_resolution = "non_tente"
-
-    try:
-        perimetre = resoudre_document(requete)
-        statut_resolution = perimetre.statut
-        if perimetre.contraignant:
-            documents = list(perimetre.valeurs_filtre)
-    except Exception as exc:  # noqa: BLE001 — la résolution ne doit jamais casser le graphe
-        logger.warning("Résolution documentaire pour summarize impossible : %s", exc)
-        statut_resolution = "erreur"
+    perimetre, statut_resolution = _resoudre_perimetre_document(requete)
+    documents = (
+        list(perimetre.valeurs_filtre)
+        if perimetre is not None and perimetre.contraignant
+        else None
+    )
 
     resultat = session.executer_outil(
         "summarize",
@@ -353,6 +469,140 @@ def noeud_summarize(etat: EtatGraphe) -> dict:
         succes=resultat.succes,
         documents_demandes=documents,
         resolution_documentaire=statut_resolution,
+    )
+
+    return {"session": session, "reponse": resultat}
+
+
+# Raison renvoyée par `CatalogueDocuments.resoudre` (`src.rag.retrieval`,
+# non modifiée ici) lorsqu'une correspondance a été détectée mais reste sous
+# le seuil de résolution — un signal qu'un document semble bien visé par la
+# requête, contrairement à l'absence totale de correspondance. Limite
+# connue : le résolveur ne distingue pas structurellement « document nommé
+# mais totalement absent du catalogue » d'« aucune référence documentaire
+# dans la requête » — les deux retombent sur statut="aucun" avec cette même
+# raison OU sur raison="aucune_correspondance" selon les cas ; seule cette
+# dernière est traitée comme « aucun document visé » (voir
+# `_document_vise_sans_resolution_fiable`).
+_RAISON_CORRESPONDANCE_PARTIELLE = "score_insuffisant"
+
+
+def _document_vise_sans_resolution_fiable(perimetre: Any) -> bool:
+    """
+    Vrai si la requête semble viser un document précis que la résolution ne
+    peut pas désigner de façon fiable : plusieurs candidats également
+    valables (`statut="compatible"`), périmètre trop ambigu pour trancher
+    (`statut="ambigu"`), ou une correspondance détectée mais insuffisante
+    (`statut="aucun"`, `raison="score_insuffisant"`).
+
+    Distinct du cas où la requête ne référence aucun document du tout
+    (`statut="aucun"` avec toute autre raison, ex. `"aucune_correspondance"`)
+    — ce dernier cas relève du mode historique contextuel
+    (`ContexteOutil.sources`), pas d'un refus.
+    """
+    if perimetre is None:
+        return False
+    if perimetre.statut in {"compatible", "ambigu"}:
+        return True
+    return (
+        perimetre.statut == "aucun"
+        and perimetre.raison == _RAISON_CORRESPONDANCE_PARTIELLE
+    )
+
+
+def noeud_classify(etat: EtatGraphe) -> dict:
+    """
+    Exécute l'outil `classify` via le registre (cette action), exactement
+    comme `noeud_rechercher` le fait pour `search`.
+
+    Trois chemins, selon ce que la résolution documentaire indique :
+
+        1. document résolu de façon unique (`perimetre.contraignant`, un
+           seul identifiant) : `classify` est appelé en mode document
+           complet (`classify(documents=[...])`, Option E — classification
+           hiérarchique par lots + agrégation déterministe, voir
+           `src.tools.classify`). Aucun `search` interne n'est exécuté.
+
+        2. requête visant explicitement un document, mais résolution non
+           fiable — plusieurs candidats également valables, périmètre
+           ambigu, ou correspondance sous le seuil de résolution (voir
+           `_document_vise_sans_resolution_fiable`) : refus déterministe
+           construit directement ici, SANS appeler `classify` ni `search`.
+           Aucun document n'est choisi implicitement, et aucun retrieval de
+           repli n'est tenté : un choix approximatif serait factuellement
+           risqué pour une classification document-level (voir audit
+           préalable de cette mission).
+
+        3. aucune référence documentaire détectée dans la requête (périmètre
+           "aucun" pour toute autre raison) : comportement historique
+           inchangé — un `search` ciblé alimente `ContexteOutil.sources` si
+           le contexte est encore vide, puis `classify(document=None)`
+           retombe sur son mode Cas B (classification des sources déjà
+           présentes, avec le cloisonnement `_filtrer_document` existant si
+           plusieurs documents apparaissent). C'est le seul cas où ce mode
+           historique contextuel reste sollicité.
+
+    Catégories : toujours celles du profil technique actif
+    (`profil.classification.noms()`), jamais inventées ni demandées à
+    l'utilisateur — le même vocabulaire que celui utilisé à l'ingestion.
+
+    Pas de boucle de récupération pour un échec de `classify` : succès ou
+    échec, le `ResultatOutil` devient directement la réponse finale.
+    """
+    session = etat.session
+    requete = session.etat.requete_courante
+    categories = get_profil().classification.noms()
+
+    perimetre, statut_resolution = _resoudre_perimetre_document(requete)
+    document: str | None = None
+    if (
+        perimetre is not None
+        and perimetre.contraignant
+        and len(perimetre.valeurs_filtre) == 1
+    ):
+        document = perimetre.valeurs_filtre[0]
+
+    if document is not None:
+        mode = "document_complet"
+        resultat = session.executer_outil(
+            "classify",
+            categories=categories,
+            documents=[document],
+        )
+    elif _document_vise_sans_resolution_fiable(perimetre):
+        mode = "document_vise_non_resolu"
+        candidats = ", ".join(perimetre.libelles) if perimetre.libelles else None
+        message = (
+            (
+                f"Plusieurs documents correspondent à la demande sans désignation "
+                f"fiable ({candidats}). Précise le document à classifier."
+            )
+            if candidats
+            else (
+                "Document à classifier non identifié de façon fiable. "
+                "Précise le document à classifier."
+            )
+        )
+        resultat = ResultatOutil.echec("classify", message)
+        session.contexte.ajouter_resultat(resultat)
+    else:
+        mode = "contexte_existant"
+        if not session.a_des_preuves:
+            session.executer_outil("search", requete=requete)
+
+        resultat = session.executer_outil(
+            "classify",
+            categories=categories,
+            document=None,
+        )
+
+    session.etat.ajouter_trace(
+        "classify",
+        "Classification produite." if resultat.succes else "Classification impossible.",
+        succes=resultat.succes,
+        document_demande=document,
+        resolution_documentaire=statut_resolution,
+        mode=mode,
     )
 
     return {"session": session, "reponse": resultat}
@@ -659,6 +909,7 @@ __all__ = [
     "noeud_detecter_intention",
     "router_intention",
     "noeud_summarize",
+    "noeud_classify",
     "noeud_rechercher",
     "noeud_evaluer_preuves",
     "router_apres_evaluation",

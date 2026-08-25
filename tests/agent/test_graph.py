@@ -167,6 +167,34 @@ def _outil_summarize_capture(
     return _fabrique, appels
 
 
+class _ArgsClassifyFactice(BaseModel):
+    categories: list[str] = Field(default_factory=list)
+    document: str | None = Field(default=None)
+    critere: str | None = Field(default=None)
+    instruction: str | None = Field(default=None)
+
+
+def _outil_classify_capture(
+    resultat: ResultatOutil,
+) -> tuple[Callable[[], DefinitionOutil], list[dict[str, Any]]]:
+    """Fabrique factice de `classify` qui enregistre les arguments reçus."""
+    appels: list[dict[str, Any]] = []
+
+    def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        appels.append(kw)
+        return resultat
+
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="classify",
+            description="Classify factice.",
+            schema_arguments=_ArgsClassifyFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique, appels
+
+
 class _LLMNonSollicite:
     def invoke(self, messages: Any):  # pragma: no cover - non sollicité ici
         raise AssertionError("Aucun LLM ne devrait être invoqué dans ce test.")
@@ -631,3 +659,265 @@ def test_I_ambiguite_documentaire_conserve_le_refus(monkeypatch):
     assert reponse.succes is False
     assert appels_summarize[0]["documents"] is None
     assert compteur_recherche[0] == 0
+
+
+# ===========================================================================
+# Action « classify dans le graphe » — routage vers CLASSIFY
+# ===========================================================================
+
+
+def test_classify_A_qa_reste_search(monkeypatch):
+    """Une question factuelle continue de suivre la boucle QA, classify jamais appelé."""
+    appels_generation = _fabrique_generation_factice(monkeypatch)
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(
+        ResultatOutil(outil="summarize", succes=True, message="ne devrait jamais être appelé")
+    )
+    fabrique_classify, appels_classify = _outil_classify_capture(
+        ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
+    )
+    llm = _LLMScripte(verdicts_suffisance=['{"suffisant": true, "raison": "ok"}'])
+
+    session = construire_session(
+        "Who is the CEO of company X?",
+        llm=llm,
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize, fabrique_classify],
+    )
+    reponse = _invoquer(session)
+
+    assert isinstance(reponse, ReponseRAG)
+    assert compteur_recherche[0] == 1
+    assert appels_summarize == []
+    assert appels_classify == []
+
+
+def test_classify_B_resume_reste_summarize(monkeypatch):
+    """« Résume le rapport CNIL. » reste SUMMARIZE, classify jamais appelé."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-cnil",), libelles=("CNIL",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(
+        ResultatOutil(outil="summarize", succes=True, message="ok")
+    )
+    fabrique_classify, appels_classify = _outil_classify_capture(
+        ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
+    )
+
+    session = construire_session(
+        "Résume le rapport CNIL.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize, fabrique_classify],
+    )
+    reponse = _invoquer(session)
+
+    assert isinstance(reponse, ResultatOutil)
+    assert reponse.outil == "summarize"
+    assert len(appels_summarize) == 1
+    assert appels_classify == []
+    assert compteur_recherche[0] == 0
+
+
+def test_classify_C_classification_francaise(monkeypatch):
+    """
+    « Classe le rapport CNIL 2023. » route vers CLASSIFY.
+
+    Document résolu de façon fiable (périmètre exact) : classify passe en
+    mode document complet (Option E) et n'a plus besoin d'un search interne
+    pour s'alimenter — contrairement à l'ancien comportement top-k.
+    """
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_classify = ResultatOutil(
+        outil="classify",
+        succes=True,
+        message="Document classifié dans la catégorie « rapport ».",
+        donnees={"categorie": "rapport", "confiance": 0.9},
+    )
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+
+    session = construire_session(
+        "Classe le rapport CNIL 2023.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_classify
+    assert len(appels_classify) == 1
+    assert compteur_recherche[0] == 0  # document résolu -> mode document complet, aucun search
+
+
+def test_classify_D_classification_anglaise(monkeypatch):
+    """« Classify the CNIL annual report. » route aussi vers CLASSIFY."""
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+
+    session = construire_session(
+        "Classify the CNIL annual report.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_classify
+    assert len(appels_classify) == 1
+
+
+def test_classify_E_bon_tool_search_au_plus_une_fois(monkeypatch):
+    """
+    classify appelé exactement une fois, summarize jamais. `search` est
+    appelé au plus une fois — désormais zéro fois quand le document se
+    résout de façon fiable (mode document complet, Option E), et au plus
+    une fois dans le cas contraire (mode historique sur
+    `ContexteOutil.sources`) — jamais davantage, jamais pour un fallback
+    vers la boucle QA.
+    """
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(
+        ResultatOutil(outil="summarize", succes=True, message="ne devrait jamais être appelé")
+    )
+
+    session = construire_session(
+        "Classe le document A.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify, fabrique_summarize],
+    )
+    _invoquer(session)
+
+    assert len(appels_classify) == 1
+    assert compteur_recherche[0] <= 1
+    assert appels_summarize == []
+    assert session.outils_utilises()[-1] == "classify"
+
+
+def test_classify_F_document_transmis(monkeypatch):
+    """Le document résolu arrive correctement dans documents=[...] (mode document complet)."""
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+
+    session = construire_session(
+        "Classe le rapport CNIL 2023.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    _invoquer(session)
+
+    assert appels_classify[0]["documents"] == ["cnil-44e-rapport-annuel-2023.pdf"]
+    assert "document" not in appels_classify[0]
+    assert appels_classify[0]["categories"]  # catégories du profil technique, non vides
+
+
+def test_classify_G_succes_devient_la_reponse_finale(monkeypatch):
+    """`ResultatOutil.succes=True` -> réponse finale de l'agent correctement remplie."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_classify = ResultatOutil(
+        outil="classify",
+        succes=True,
+        message="Document classifié dans la catégorie « rapport ».",
+        donnees={"categorie": "rapport", "confiance": 0.87, "citations": ["S1"]},
+        sources=[SourceOutil(doc_id="doc-a", source="a.pdf", nom_fichier="a.pdf", page=1, extrait="x")],
+    )
+    fabrique_classify, _ = _outil_classify_capture(resultat_classify)
+
+    session = construire_session(
+        "Classe le document A.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    reponse = _invoquer(session)
+
+    assert isinstance(reponse, ResultatOutil)
+    assert reponse.succes is True
+    assert reponse.donnees["categorie"] == "rapport"
+    assert len(reponse.sources) == 1
+
+
+def test_classify_H_echec_termine_proprement_sans_boucle_qa(monkeypatch):
+    """`succes=False` -> le graphe termine proprement, sans crash ni boucle QA."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-x",), libelles=("Doc X",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_echec = ResultatOutil(
+        outil="classify",
+        succes=False,
+        message="Plusieurs documents sont présents dans le contexte. Précise le document à classifier.",
+    )
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_echec)
+
+    session = construire_session(
+        "Classe le document X.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_echec
+    assert reponse.succes is False
+    assert "Précise le document" in reponse.message
+    assert len(appels_classify) == 1  # pas de retry
+    assert compteur_recherche[0] <= 1  # aucune boucle QA déclenchée
+
+
+def test_classify_I_ambiguite_documentaire_conserve_le_refus(monkeypatch):
+    """
+    Désignation ambiguë : `classify` n'est PAS appelé (aucun choix implicite
+    entre les candidats), le nœud construit lui-même un refus déterministe,
+    et aucun `search` de repli n'est déclenché.
+    """
+    perimetre = PerimetreDocumentaire(
+        statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_jamais_appele = ResultatOutil(
+        outil="classify", succes=True, message="ne devrait jamais être appelé"
+    )
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_jamais_appele)
+
+    session = construire_session(
+        "Classe le rapport.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is not resultat_jamais_appele
+    assert appels_classify == []
+    assert compteur_recherche[0] == 0
+    assert reponse.succes is False
