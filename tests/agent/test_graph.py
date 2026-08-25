@@ -12,6 +12,7 @@ Les scores factices encadrent volontairement `nodes.SEUIL_PERTINENCE_MINIMALE`
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Sequence
 
 import pytest
@@ -195,9 +196,75 @@ def _outil_classify_capture(
     return _fabrique, appels
 
 
+class _ArgsExtractFactice(BaseModel):
+    champs: list[str] = Field(default_factory=list)
+    document: str | None = Field(default=None)
+    documents: list[str] | None = Field(default=None)
+    instruction: str | None = Field(default=None)
+
+
+def _outil_extract_capture(
+    resultat: ResultatOutil,
+) -> tuple[Callable[[], DefinitionOutil], list[dict[str, Any]]]:
+    """Fabrique factice de `extract` qui enregistre les arguments reçus."""
+    appels: list[dict[str, Any]] = []
+
+    def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        appels.append(kw)
+        return resultat
+
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="extract",
+            description="Extract factice.",
+            schema_arguments=_ArgsExtractFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique, appels
+
+
 class _LLMNonSollicite:
     def invoke(self, messages: Any):  # pragma: no cover - non sollicité ici
         raise AssertionError("Aucun LLM ne devrait être invoqué dans ce test.")
+
+
+class _LLMChamps:
+    """Répond au parsing des champs d'extraction (`noeud_extract`).
+
+    N'est jamais sollicité pour la détection d'intention tant que la
+    requête déclenche EXTRACT de façon déterministe (voir
+    `_JETONS_EXTRACT_SURS`/`_MOTIF_CHAMP_VALEUR`) : aucune ambiguïté à
+    lever dans ce cas, un seul type de message système est donc attendu.
+    """
+
+    def __init__(self, champs: list[str]) -> None:
+        self._champs = champs
+
+    def invoke(self, messages: Any) -> AIMessage:
+        return AIMessage(content=json.dumps({"champs": self._champs}))
+
+
+class _LLMExtractPipeline:
+    """
+    Distingue désambiguïsation SEARCH/EXTRACT et parsing des champs par le
+    contenu du message système — nécessaire lorsque la requête est
+    volontairement ambiguë (zone grise EXTRACT implicite) : les deux appels
+    LLM bornés de `noeud_detecter_intention` puis `noeud_extract`
+    interviennent l'un après l'autre dans le même test.
+    """
+
+    def __init__(self, *, intention: str = "EXTRACT", champs: list[str] | None = None) -> None:
+        self._intention = intention
+        self._champs = champs or []
+
+    def invoke(self, messages: Any) -> AIMessage:
+        systeme = messages[0].content
+        if "EXTRACT :" in systeme and "distingues deux intentions" in systeme:
+            return AIMessage(content=json.dumps({"intention": self._intention}))
+        if "identifies la liste des informations" in systeme:
+            return AIMessage(content=json.dumps({"champs": self._champs}))
+        raise AssertionError(f"Message système inattendu : {systeme[:120]!r}")
 
 
 class _LLMScripte:
@@ -921,3 +988,224 @@ def test_classify_I_ambiguite_documentaire_conserve_le_refus(monkeypatch):
     assert appels_classify == []
     assert compteur_recherche[0] == 0
     assert reponse.succes is False
+
+
+# ===========================================================================
+# EXTRACT (Action 04)
+# ===========================================================================
+
+
+def test_extract_A_qa_reste_search(monkeypatch):
+    """Une question factuelle simple continue de suivre la boucle QA, extract jamais appelé."""
+    appels_generation = _fabrique_generation_factice(monkeypatch)
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    fabrique_extract, appels_extract = _outil_extract_capture(
+        ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    )
+    llm = _LLMScripte(verdicts_suffisance=['{"suffisant": true, "raison": "ok"}'])
+
+    session = construire_session(
+        "What is the invoice date?",
+        llm=llm,
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    assert isinstance(reponse, ReponseRAG)
+    assert compteur_recherche[0] == 1
+    assert appels_extract == []
+
+
+def test_extract_B_summarize_reste_summarize(monkeypatch):
+    """« Résume le rapport CNIL. » reste SUMMARIZE, extract jamais appelé."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-cnil",), libelles=("CNIL",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(
+        ResultatOutil(outil="summarize", succes=True, message="ok")
+    )
+    fabrique_extract, appels_extract = _outil_extract_capture(
+        ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    )
+
+    session = construire_session(
+        "Résume le rapport CNIL.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    assert isinstance(reponse, ResultatOutil)
+    assert reponse.outil == "summarize"
+    assert appels_extract == []
+
+
+def test_extract_C_classify_reste_classify(monkeypatch):
+    """« Classe le rapport CNIL 2023. » reste CLASSIFY, extract jamais appelé."""
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    fabrique_classify, appels_classify = _outil_classify_capture(
+        ResultatOutil(outil="classify", succes=True, message="ok")
+    )
+    fabrique_extract, appels_extract = _outil_extract_capture(
+        ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    )
+
+    session = construire_session(
+        "Classe le rapport CNIL 2023.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse.outil == "classify"
+    assert appels_extract == []
+
+
+def test_extract_D_explicite_route_vers_extract_document_complet(monkeypatch):
+    """« Extrais le fournisseur, la date et le montant du rapport CNIL 2023. » route vers EXTRACT."""
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+
+    session = construire_session(
+        "Extrais le fournisseur, la date et le montant du rapport CNIL 2023.",
+        llm=_LLMChamps(["fournisseur", "date", "montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_extract
+    assert appels_extract[0]["documents"] == ["cnil-44e-rapport-annuel-2023.pdf"]
+    assert appels_extract[0]["champs"] == ["fournisseur", "date", "montant"]
+    assert compteur_recherche[0] == 0  # document résolu -> mode document complet, aucun search
+
+
+def test_extract_E_implicite_route_vers_extract(monkeypatch):
+    """
+    « Donne-moi le fournisseur, la date et le montant total. » (aucun verbe
+    d'extraction) doit être routée vers EXTRACT via la désambiguïsation
+    bornée, exactement comme le veut la mission.
+    """
+    monkeypatch.setattr(
+        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+    )
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+
+    llm = _LLMExtractPipeline(intention="EXTRACT", champs=["fournisseur", "date", "montant total"])
+
+    session = construire_session(
+        "Donne-moi le fournisseur, la date et le montant total.",
+        llm=llm,
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_extract
+    assert appels_extract[0]["champs"] == ["fournisseur", "date", "montant total"]
+    # Aucun document explicitement visé : mode contextuel, search interne
+    # au plus une fois (comportement historique, contexte vide au départ).
+    assert compteur_recherche[0] == 1
+
+
+def test_extract_F_ambiguite_documentaire_conserve_le_refus(monkeypatch):
+    """
+    Désignation ambiguë : `extract` n'est PAS appelé (aucun choix implicite
+    entre les candidats), le nœud construit lui-même un refus déterministe,
+    et aucun `search` de repli n'est déclenché — même garantie que CLASSIFY.
+    """
+    perimetre = PerimetreDocumentaire(
+        statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_jamais_appele = ResultatOutil(
+        outil="extract", succes=True, message="ne devrait jamais être appelé"
+    )
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_jamais_appele)
+
+    session = construire_session(
+        "Extrais le montant du rapport.",
+        llm=_LLMChamps(["montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is not resultat_jamais_appele
+    assert appels_extract == []
+    assert compteur_recherche[0] == 0
+    assert reponse.succes is False
+
+
+def test_extract_G_echec_termine_proprement_sans_boucle_qa(monkeypatch):
+    """`succes=False` -> le graphe termine proprement, sans crash ni boucle QA."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-x",), libelles=("Doc X",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_echec = ResultatOutil(
+        outil="extract", succes=False, message="Aucun champ d'extraction valide n'a été fourni."
+    )
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_echec)
+
+    session = construire_session(
+        "Extrais le document X.",
+        llm=_LLMChamps([]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    assert reponse is resultat_echec
+    assert reponse.succes is False
+    assert len(appels_extract) == 1  # pas de retry
+    assert compteur_recherche[0] == 0
+
+
+def test_extract_H_succes_devient_la_reponse_finale(monkeypatch):
+    """`ResultatOutil.succes=True` -> réponse finale de l'agent correctement remplie."""
+    perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_extract = ResultatOutil(
+        outil="extract",
+        succes=True,
+        message="1 information(s) extraite(s) sur 1 champ(s) demandé(s).",
+        donnees={"extractions": {"montant": {"trouve": True, "valeur": "100 EUR"}}},
+        sources=[SourceOutil(doc_id="doc-a", source="a.pdf", nom_fichier="a.pdf", page=1, extrait="x")],
+    )
+    fabrique_extract, _ = _outil_extract_capture(resultat_extract)
+
+    session = construire_session(
+        "Extrais le montant du document A.",
+        llm=_LLMChamps(["montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    assert isinstance(reponse, ResultatOutil)
+    assert reponse.succes is True
+    assert reponse.donnees["extractions"]["montant"]["valeur"] == "100 EUR"
+    assert len(reponse.sources) == 1

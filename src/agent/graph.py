@@ -1,5 +1,5 @@
 """
-Graphe agentique : détecter_intention -> (SEARCH | SUMMARIZE | CLASSIFY).
+Graphe agentique : détecter_intention -> (SEARCH | SUMMARIZE | CLASSIFY | EXTRACT).
 
 Branche SEARCH — inchangée depuis le premier graphe (Action « graphe
 minimal ») :
@@ -12,23 +12,31 @@ Branche SUMMARIZE (Action 03B) :
 
     summarize -> répondre
 
-Branche CLASSIFY (cette action) :
+Branche CLASSIFY (Action « classify Option E ») :
 
     classify -> répondre
+
+Branche EXTRACT (Action 04) :
+
+    extract -> répondre
 
 Le routage est 100% déterministe, jamais confié au tool-calling du LLM : la
 fiabilité du function-calling de Qwen3 8B via Ollama n'est pas établie dans
 ce dépôt, et le graphe doit rester prévisible — pour `router_apres_evaluation`
-comme pour `router_intention` (vocabulaire fermé + classifieur LLM borné
-pour la seule zone grise CLASSIFY/SEARCH, voir `src.agent.nodes`, jamais un
-choix de tool par le LLM). `SessionAgent.outils_langchain()` reste
-disponible sans rien casser si un routage plus autonome est voulu plus tard.
+comme pour `router_intention` (vocabulaire fermé + classifieurs LLM bornés
+pour les deux seules zones grises CLASSIFY/SEARCH et SEARCH/EXTRACT, voir
+`src.agent.nodes`, jamais un choix de tool par le LLM). Le parsing des
+champs demandés par EXTRACT (`_parser_champs_extraction`, dans
+`src.agent.nodes`) est lui aussi un appel LLM borné, distinct du routage :
+il ne choisit ni tool, ni document, ni catégorie.
+`SessionAgent.outils_langchain()` reste disponible sans rien casser si un
+routage plus autonome est voulu plus tard.
 
 Ce module ne réimplémente ni le RAG, ni les outils, ni `EtatAgent` /
 `SessionAgent` : il les consomme. `src/agent/state.py` et
-`src/agent/session.py` restent intacts. Les branches SEARCH et SUMMARIZE
-(nœuds et routeurs) n'ont subi aucune modification de comportement par
-l'ajout de CLASSIFY.
+`src/agent/session.py` restent intacts. Les branches SEARCH, SUMMARIZE et
+CLASSIFY (nœuds et routeurs) n'ont subi aucune modification de comportement
+par l'ajout de EXTRACT.
 """
 
 from __future__ import annotations
@@ -42,6 +50,7 @@ from src.agent.nodes import (
     noeud_classify,
     noeud_detecter_intention,
     noeud_evaluer_preuves,
+    noeud_extract,
     noeud_generer_reponse,
     noeud_reformuler,
     noeud_rechercher,
@@ -67,6 +76,7 @@ def construire_graphe() -> Any:
     graphe.add_node("generer_reponse", noeud_generer_reponse)
     graphe.add_node("summarize", noeud_summarize)
     graphe.add_node("classify", noeud_classify)
+    graphe.add_node("extract", noeud_extract)
 
     graphe.add_edge(START, "detecter_intention")
     graphe.add_conditional_edges(
@@ -76,6 +86,7 @@ def construire_graphe() -> Any:
             "rechercher": "rechercher",
             "summarize": "summarize",
             "classify": "classify",
+            "extract": "extract",
         },
     )
     graphe.add_edge("rechercher", "evaluer_preuves")
@@ -91,6 +102,7 @@ def construire_graphe() -> Any:
     graphe.add_edge("generer_reponse", END)
     graphe.add_edge("summarize", END)
     graphe.add_edge("classify", END)
+    graphe.add_edge("extract", END)
 
     return graphe.compile()
 
@@ -119,8 +131,9 @@ def invoquer_agent(
               tentatives (`EtatAgent.max_tentatives`) garantit que ce nœud
               est toujours atteint : la boucle ne peut pas tourner
               indéfiniment.
-            - SUMMARIZE ou CLASSIFY : un `ResultatOutil` (`src.tools.base`),
-              le retour tel quel de l'outil correspondant (succès ou échec).
+            - SUMMARIZE, CLASSIFY ou EXTRACT : un `ResultatOutil`
+              (`src.tools.base`), le retour tel quel de l'outil
+              correspondant (succès ou échec).
     """
     session = construire_session(requete, **kwargs_session)
 

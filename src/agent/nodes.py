@@ -271,6 +271,55 @@ Réponds uniquement avec un objet JSON strict :
 {"intention": "SEARCH"|"CLASSIFY"}
 """
 
+# EXTRACT (Action 04) : uniquement des formes VERBALES d'action sûres,
+# bilingues — jamais le nom "extraction" seul, pour la même raison que
+# "catégorie"/"classification" sont exclus des jetons sûrs de CLASSIFY :
+# "Quelle est la méthode d'extraction des données utilisée dans ce
+# rapport ?" porte sur un FAIT du document, pas sur une demande
+# d'extraction. "extrait"/"extraits" sont exclus pour la même raison que
+# "classe" chez CLASSIFY (forme nominale ou verbale au présent, ambiguë) —
+# seules les formes non ambiguës (impératif, infinitif) sont retenues.
+_JETONS_EXTRACT_SURS = {
+    "extrais", "extrayez", "extrayons",
+    "extraire",
+    "extract", "extracts", "extracting",
+}
+
+# Motif purement STRUCTUREL (aucun mot métier) : une formulation répétée
+# "champ : ?" (ex. « Fournisseur : ? Date : ? Montant : ? ») signale de
+# façon fiable une demande de plusieurs valeurs structurées, quel que soit
+# le vocabulaire employé — jamais une liste de noms de champs codée en dur.
+_MOTIF_CHAMP_VALEUR = re.compile(r"\S+\s*:\s*\?")
+
+# Signal d'énumération — PAS une condition suffisante à elle seule pour
+# router vers EXTRACT (voir _AMBIGU_SEARCH_EXTRACT juste en dessous) : une
+# requête énumérant plusieurs éléments peut aussi bien annoncer une
+# extraction implicite (« Donne-moi X, Y et Z ») qu'une question analytique
+# (« Compare X et Y »). Cette ambiguïté structurelle est précisément ce que
+# le classifieur LLM borné doit trancher — jamais une règle Python seule
+# du type "si plusieurs éléments sont mentionnés, alors EXTRACT".
+_MARQUEURS_ENUMERATION = (",", " et ", " and ", " ainsi que ")
+
+_AMBIGU_SEARCH_EXTRACT = "ambigu_search_extract"
+
+_SYSTEME_DESAMBIGUISATION_EXTRACT = """Tu distingues deux intentions possibles pour une requête adressée à un agent documentaire.
+
+SEARCH : la requête pose une question factuelle ou analytique, y compris
+lorsqu'elle porte sur plusieurs éléments à la fois (ex. « Compare le chiffre
+d'affaires 2024 et 2025 », « Quelle est la différence entre X et Y ? »). Le
+but attendu est une réponse rédigée, pas une liste de champs structurés.
+
+EXTRACT : la requête demande explicitement de récupérer plusieurs
+informations, valeurs ou attributs INDÉPENDANTS d'un document, sous forme
+structurée (ex. « Donne-moi le fournisseur, la date et le montant total. »,
+« Quels sont le numéro de facture et la date d'échéance ? »). Le but attendu
+est une liste de champs et de valeurs, pas une réponse rédigée ni une
+analyse comparative.
+
+Réponds uniquement avec un objet JSON strict :
+{"intention": "SEARCH"|"EXTRACT"}
+"""
+
 
 def _normaliser_intention(texte: str) -> str:
     """Minuscule, sans accents — utilitaire local, l'agent ne dépend pas des
@@ -282,9 +331,10 @@ def _normaliser_intention(texte: str) -> str:
 
 def _detecter_intention(requete: str) -> str:
     """
-    Classifie une requête en ``"search"``, ``"summarize"``, ``"classify"``
-    ou ``"ambigu_classify"`` (zone grise résolue ensuite par
-    `_desambiguiser_intention_classify`, voir `noeud_detecter_intention`).
+    Classifie une requête en ``"search"``, ``"summarize"``, ``"classify"``,
+    ``"extract"``, ``"ambigu_classify"`` ou ``"ambigu_search_extract"``
+    (zones grises résolues ensuite par `_desambiguiser_intention_classify`/
+    `_desambiguiser_intention_search_extract`, voir `noeud_detecter_intention`).
 
     Déterministe, bornée, testable indépendamment du graphe et du corpus.
     """
@@ -304,6 +354,14 @@ def _detecter_intention(requete: str) -> str:
 
     if ensemble_jetons & _JETONS_CLASSIFY_AMBIGUS:
         return _AMBIGU_CLASSIFY
+
+    if ensemble_jetons & _JETONS_EXTRACT_SURS:
+        return "extract"
+    if _MOTIF_CHAMP_VALEUR.search(requete):
+        return "extract"
+
+    if any(marqueur in normalisee for marqueur in _MARQUEURS_ENUMERATION):
+        return _AMBIGU_SEARCH_EXTRACT
 
     return "search"
 
@@ -331,6 +389,82 @@ def _desambiguiser_intention_classify(llm: Any, requete: str) -> str:
     return "search"
 
 
+def _desambiguiser_intention_search_extract(llm: Any, requete: str) -> str:
+    """
+    Classifieur LLM borné, appelé uniquement pour `_AMBIGU_SEARCH_EXTRACT` :
+    une seule évaluation, ensemble de sortie fermé ``{"search", "extract"}``,
+    jamais de choix de tool par le LLM lui-même, jamais de choix de
+    document, jamais de champ à extraire (voir `_parser_champs_extraction`,
+    un appel borné séparé, déclenché seulement une fois EXTRACT confirmé).
+    Toute sortie invalide ou tout échec (LLM indisponible, JSON invalide)
+    retombe sur ``"search"`` — repli sûr vers le chemin existant, jamais
+    l'inverse.
+    """
+    try:
+        texte = invoquer_llm(
+            llm,
+            systeme=_SYSTEME_DESAMBIGUISATION_EXTRACT,
+            utilisateur=requete,
+        )
+        objet = extraire_json_objet(texte)
+        valeur = str(objet.get("intention", "")).strip().upper()
+        if valeur == "EXTRACT":
+            return "extract"
+    except Exception as exc:  # noqa: BLE001 — classifieur borné, repli conservateur
+        logger.warning("Désambiguïsation d'intention EXTRACT impossible : %s", exc)
+    return "search"
+
+
+_SYSTEME_PARSING_CHAMPS_EXTRACTION = """Tu identifies la liste des informations demandées dans une requête adressée à un système d'extraction documentaire.
+
+RÈGLES STRICTES
+- Identifie uniquement les champs/informations EXPLICITEMENT demandés dans la requête.
+- N'invente jamais un champ absent de la requête.
+- Reformule chaque champ en une courte étiquette (2 à 6 mots), sans changer son sens.
+- Conserve la langue de la requête.
+- Si aucun champ n'est identifiable, renvoie une liste vide.
+
+Réponds uniquement avec un objet JSON strict :
+{"champs": ["...", "..."]}
+"""
+
+
+def _parser_champs_extraction(llm: Any, requete: str) -> list[str]:
+    """
+    Appel LLM borné (Action 04), déclenché uniquement une fois l'intention
+    EXTRACT déjà confirmée : une seule évaluation, sortie structurée stricte
+    ``{"champs": [...]}``, validée en Python (liste de chaînes non vides,
+    dédupliquées, dans leur ordre d'apparition). Ce parseur ne choisit ni
+    document, ni tool, ni catégorie — il segmente uniquement la requête en
+    champs demandés, sans jamais en inventer un absent. Tout échec (LLM
+    indisponible, JSON invalide, structure inattendue) retombe sur une liste
+    vide : `extract` échoue alors proprement de lui-même ("Aucun champ
+    d'extraction valide n'a été fourni."), jamais un champ inventé.
+    """
+    try:
+        texte = invoquer_llm(
+            llm,
+            systeme=_SYSTEME_PARSING_CHAMPS_EXTRACTION,
+            utilisateur=requete,
+        )
+        objet = extraire_json_objet(texte)
+        champs_bruts = objet.get("champs", [])
+
+        if not isinstance(champs_bruts, list):
+            return []
+
+        champs: list[str] = []
+        for champ in champs_bruts:
+            champ = " ".join(str(champ).split())
+            if champ and champ not in champs:
+                champs.append(champ)
+        return champs
+
+    except Exception as exc:  # noqa: BLE001 — parseur borné, repli conservateur
+        logger.warning("Extraction des champs demandés impossible : %s", exc)
+        return []
+
+
 def _stagnation(session: SessionAgent, score_maximal: float) -> bool:
     """
     Vrai si le score de pertinence n'a pas bougé depuis la tentative
@@ -355,23 +489,29 @@ def _stagnation(session: SessionAgent, score_maximal: float) -> bool:
 
 def noeud_detecter_intention(etat: EtatGraphe) -> dict:
     """
-    Premier nœud du graphe : SEARCH, SUMMARIZE ou CLASSIFY (cette action).
+    Premier nœud du graphe : SEARCH, SUMMARIZE, CLASSIFY ou EXTRACT (cette
+    action).
 
     La détection lexicale (`_detecter_intention`) tranche seule dans
-    l'immense majorité des cas, sans LLM. Le seul cas où elle ne peut pas
-    trancher de façon fiable (« catégorie »/« classification » employés comme
-    noms, voir `_JETONS_CLASSIFY_AMBIGUS`) passe par un classifieur LLM borné
-    (`_desambiguiser_intention_classify`) — jamais par un mot-clé
-    supplémentaire, qui reproduirait la même ambiguïté.
+    l'immense majorité des cas, sans LLM. Deux zones grises, chacune
+    résolue par son propre classifieur LLM borné — jamais par un mot-clé
+    supplémentaire, qui reproduirait la même ambiguïté :
+        - « catégorie »/« classification » employés comme noms (voir
+          `_JETONS_CLASSIFY_AMBIGUS`) -> `_desambiguiser_intention_classify` ;
+        - énumération de plusieurs éléments sans verbe d'extraction ni motif
+          structurel « champ : ? » (voir `_MARQUEURS_ENUMERATION`) ->
+          `_desambiguiser_intention_search_extract`.
     """
     session = etat.session
     requete = session.etat.requete_courante
 
     intention = _detecter_intention(requete)
-    desambiguisation_llm = intention == _AMBIGU_CLASSIFY
+    desambiguisation_llm = intention in {_AMBIGU_CLASSIFY, _AMBIGU_SEARCH_EXTRACT}
 
-    if desambiguisation_llm:
+    if intention == _AMBIGU_CLASSIFY:
         intention = _desambiguiser_intention_classify(session.llm, requete)
+    elif intention == _AMBIGU_SEARCH_EXTRACT:
+        intention = _desambiguiser_intention_search_extract(session.llm, requete)
 
     session.etat.ajouter_trace(
         "intention",
@@ -397,6 +537,8 @@ def router_intention(etat: EtatGraphe) -> str:
         return "summarize"
     if etat.intention == "classify":
         return "classify"
+    if etat.intention == "extract":
+        return "extract"
     return "rechercher"
 
 
@@ -600,6 +742,89 @@ def noeud_classify(etat: EtatGraphe) -> dict:
         "classify",
         "Classification produite." if resultat.succes else "Classification impossible.",
         succes=resultat.succes,
+        document_demande=document,
+        resolution_documentaire=statut_resolution,
+        mode=mode,
+    )
+
+    return {"session": session, "reponse": resultat}
+
+
+def noeud_extract(etat: EtatGraphe) -> dict:
+    """
+    Exécute l'outil `extract` via le registre (Action 04), exactement comme
+    `noeud_classify` le fait pour `classify`.
+
+    Réutilise DÉLIBÉRÉMENT le même critère de routage document-complet vs
+    contextuel que `noeud_classify` (document résolu de façon unique et
+    fiable -> mode document complet, sans search ; requête visant
+    explicitement un document mais résolution non fiable -> refus
+    déterministe, sans search ni appel à `extract` ; aucune référence
+    documentaire -> mode contextuel historique, search si le contexte est
+    vide) : c'est un choix de ROUTAGE générique, indépendant de la nature de
+    l'action, déjà validé deux fois (CLASSIFY, et implicitement SUMMARIZE).
+    L'AGRÉGATION, elle, reste spécifique à extract (déduplication de
+    valeurs, jamais un vote majoritaire — voir `src.tools.extract`, qui ne
+    réutilise aucune logique de `classify`).
+
+    Les champs demandés sont obtenus par un appel LLM borné distinct
+    (`_parser_champs_extraction`), déclenché une seule fois ici, après que
+    l'intention EXTRACT est déjà confirmée par `noeud_detecter_intention` —
+    jamais pendant la détection d'intention elle-même.
+    """
+    session = etat.session
+    requete = session.etat.requete_courante
+
+    champs = _parser_champs_extraction(session.llm, requete)
+
+    perimetre, statut_resolution = _resoudre_perimetre_document(requete)
+    document: str | None = None
+    if (
+        perimetre is not None
+        and perimetre.contraignant
+        and len(perimetre.valeurs_filtre) == 1
+    ):
+        document = perimetre.valeurs_filtre[0]
+
+    if document is not None:
+        mode = "document_complet"
+        resultat = session.executer_outil(
+            "extract",
+            champs=champs,
+            documents=[document],
+        )
+    elif _document_vise_sans_resolution_fiable(perimetre):
+        mode = "document_vise_non_resolu"
+        candidats = ", ".join(perimetre.libelles) if perimetre.libelles else None
+        message = (
+            (
+                f"Plusieurs documents correspondent à la demande sans désignation "
+                f"fiable ({candidats}). Précise le document sur lequel extraire."
+            )
+            if candidats
+            else (
+                "Document à traiter non identifié de façon fiable. "
+                "Précise le document sur lequel extraire."
+            )
+        )
+        resultat = ResultatOutil.echec("extract", message)
+        session.contexte.ajouter_resultat(resultat)
+    else:
+        mode = "contexte_existant"
+        if not session.a_des_preuves:
+            session.executer_outil("search", requete=requete)
+
+        resultat = session.executer_outil(
+            "extract",
+            champs=champs,
+            document=None,
+        )
+
+    session.etat.ajouter_trace(
+        "extract",
+        "Extraction produite." if resultat.succes else "Extraction impossible.",
+        succes=resultat.succes,
+        champs_demandes=champs,
         document_demande=document,
         resolution_documentaire=statut_resolution,
         mode=mode,
@@ -910,6 +1135,7 @@ __all__ = [
     "router_intention",
     "noeud_summarize",
     "noeud_classify",
+    "noeud_extract",
     "noeud_rechercher",
     "noeud_evaluer_preuves",
     "router_apres_evaluation",

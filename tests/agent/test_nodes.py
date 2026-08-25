@@ -24,6 +24,7 @@ BAAI/bge-reranker-v2-m3) qui justifient ce seuil.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Sequence
 
 import pytest
@@ -450,6 +451,120 @@ def test_router_intention_route_vers_classify() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _detecter_intention (extension EXTRACT, Action 04) /
+# _desambiguiser_intention_search_extract / _parser_champs_extraction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "requete,attendu",
+    [
+        # EXTRACT explicite (verbe sûr) — mono-champ.
+        ("Extrais la date de signature.", "extract"),
+        ("Extract the contract duration.", "extract"),
+        # EXTRACT explicite — multi-champs (le verbe tranche avant même
+        # d'atteindre le signal d'énumération).
+        ("Extrais le fournisseur, la date et le montant.", "extract"),
+        ("Extract the invoice number, supplier and total amount.", "extract"),
+        # Motif structurel "champ : ?" — sûr, indépendant du vocabulaire.
+        ("Fournisseur : ? Date : ? Montant : ?", "extract"),
+        # EXTRACT implicite (énumération sans verbe) — zone grise.
+        ("Donne-moi le fournisseur, la date et le montant total.", "ambigu_search_extract"),
+        ("Quels sont le numéro de facture, le fournisseur et la date d'échéance ?", "ambigu_search_extract"),
+        ("Je veux les parties, la date de signature et la durée du contrat.", "ambigu_search_extract"),
+        ("What are the invoice number, supplier and total amount?", "ambigu_search_extract"),
+        ("Give me the parties, signing date and contract duration.", "ambigu_search_extract"),
+        # QA simple mono-information — reste SEARCH directement, sans LLM.
+        ("Quel est le montant total ?", "search"),
+        ("Qui a signé le contrat ?", "search"),
+        ("What is the invoice date?", "search"),
+        # Question analytique avec plusieurs valeurs — passe par la zone
+        # grise (le signal "et" seul ne suffit pas à décider ; c'est
+        # exactement le rôle du classifieur borné, testé plus bas).
+        ("Compare le chiffre d'affaires 2024 et 2025", "ambigu_search_extract"),
+        # Mot "extraction" présent mais intention réellement QA (nom, pas
+        # verbe) : ne doit jamais forcer EXTRACT tant qu'aucun signal
+        # d'énumération n'est présent.
+        (
+            "Quelle est la méthode d'extraction des données utilisée dans ce rapport ?",
+            "search",
+        ),
+    ],
+)
+def test_detecter_intention_extract(requete: str, attendu: str) -> None:
+    assert nodes._detecter_intention(requete) == attendu
+
+
+def test_desambiguiser_intention_extract_retourne_extract() -> None:
+    llm = _LLMDesambiguisation("EXTRACT")
+    assert (
+        nodes._desambiguiser_intention_search_extract(
+            llm, "Donne-moi le fournisseur, la date et le montant total."
+        )
+        == "extract"
+    )
+
+
+def test_desambiguiser_intention_extract_retourne_search_pour_question_analytique() -> None:
+    llm = _LLMDesambiguisation("SEARCH")
+    assert (
+        nodes._desambiguiser_intention_search_extract(llm, "Compare le chiffre d'affaires 2024 et 2025")
+        == "search"
+    )
+
+
+def test_desambiguiser_intention_extract_repli_sur_erreur_llm() -> None:
+    class _LLMExplose:
+        def invoke(self, messages):
+            raise RuntimeError("Ollama injoignable.")
+
+    assert nodes._desambiguiser_intention_search_extract(_LLMExplose(), "peu importe") == "search"
+
+
+def test_router_intention_route_vers_extract() -> None:
+    session = _session_factice(fabriques=[_outil_search_evidence_forte])
+    assert nodes.router_intention(EtatGraphe(session=session, intention="extract")) == "extract"
+
+
+class _LLMChamps:
+    def __init__(self, champs: list[str]) -> None:
+        self._champs = champs
+
+    def invoke(self, messages: Any) -> AIMessage:
+        return AIMessage(content=json.dumps({"champs": self._champs}))
+
+
+def test_parser_champs_extraction_retourne_les_champs_demandes() -> None:
+    llm = _LLMChamps(["fournisseur", "date", "montant total"])
+    assert nodes._parser_champs_extraction(llm, "peu importe") == [
+        "fournisseur",
+        "date",
+        "montant total",
+    ]
+
+
+def test_parser_champs_extraction_deduplique_et_nettoie() -> None:
+    llm = _LLMChamps(["  fournisseur ", "fournisseur", "date"])
+    assert nodes._parser_champs_extraction(llm, "peu importe") == ["fournisseur", "date"]
+
+
+def test_parser_champs_extraction_repli_liste_vide_sur_erreur_llm() -> None:
+    class _LLMExplose:
+        def invoke(self, messages):
+            raise RuntimeError("Ollama injoignable.")
+
+    assert nodes._parser_champs_extraction(_LLMExplose(), "peu importe") == []
+
+
+def test_parser_champs_extraction_repli_liste_vide_sur_json_invalide() -> None:
+    class _LLMJSONInvalide:
+        def invoke(self, messages):
+            return AIMessage(content="pas du JSON {{{")
+
+    assert nodes._parser_champs_extraction(_LLMJSONInvalide(), "peu importe") == []
+
+
+# ---------------------------------------------------------------------------
 # noeud_classify
 # ---------------------------------------------------------------------------
 
@@ -678,6 +793,194 @@ def test_noeud_classify_passe_par_le_registre_et_journalise(monkeypatch) -> None
     assert session.contexte.resultats[-1].outil == "classify"
     assert session.etat.trace[-1].nom == "classify"
     assert session.etat.trace[-1].donnees["succes"] is True
+
+
+# ---------------------------------------------------------------------------
+# noeud_extract (Action 04)
+# ---------------------------------------------------------------------------
+
+
+class _ArgsExtractFactice(BaseModel):
+    champs: list[str] = Field(default_factory=list)
+    document: str | None = Field(default=None)
+    documents: list[str] | None = Field(default=None)
+    instruction: str | None = Field(default=None)
+
+
+def _outil_extract_capture(
+    resultat: ResultatOutil,
+) -> tuple[Callable[[], DefinitionOutil], list[dict[str, Any]]]:
+    appels: list[dict[str, Any]] = []
+
+    def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        appels.append(kw)
+        return resultat
+
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="extract",
+            description="Extract factice.",
+            schema_arguments=_ArgsExtractFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique, appels
+
+
+def test_noeud_extract_document_resolu_utilise_mode_document_complet_sans_search(monkeypatch) -> None:
+    """
+    Périmètre résolu de façon non ambiguë (un seul document) : extract passe
+    en mode document complet, sans search interne — même routage que
+    `noeud_classify`, réutilisé délibérément (voir docstring de `noeud_extract`).
+    """
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Extrais la date et l'émetteur du rapport CNIL 2023.",
+        llm=_LLMChamps(["date", "émetteur"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_extract(etat)
+
+    assert appels_extract[0]["documents"] == ["cnil-44e-rapport-annuel-2023.pdf"]
+    assert "document" not in appels_extract[0]
+    assert appels_extract[0]["champs"] == ["date", "émetteur"]
+    assert mise_a_jour["reponse"] is resultat_extract
+    assert compteur_recherche[0] == 0
+
+
+def test_noeud_extract_document_ambigu_refuse_sans_appeler_loutil(monkeypatch) -> None:
+    """Périmètre 'compatible' à plusieurs valeurs : refus propre, aucun appel à extract ni search."""
+    perimetre = PerimetreDocumentaire(
+        statut="compatible", valeurs_filtre=("doc-a", "doc-b"), libelles=("Doc A", "Doc B")
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Donne-moi le montant des documents A et B.",
+        llm=_LLMChamps(["montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_extract(etat)
+
+    assert appels_extract == []
+    assert compteur_recherche[0] == 0
+    assert mise_a_jour["reponse"].succes is False
+    assert "Doc A" in mise_a_jour["reponse"].message and "Doc B" in mise_a_jour["reponse"].message
+
+
+def test_noeud_extract_document_introuvable_refuse_sans_search(monkeypatch) -> None:
+    """Correspondance détectée mais sous le seuil de résolution : refus propre, aucun search."""
+    perimetre = PerimetreDocumentaire(statut="aucun", raison="score_insuffisant", score=0.05)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Donne-moi le montant du rapport Inexistant-XYZ.",
+        llm=_LLMChamps(["montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_extract(etat)
+
+    assert appels_extract == []
+    assert compteur_recherche[0] == 0
+    assert mise_a_jour["reponse"].succes is False
+
+
+def test_noeud_extract_ne_relance_pas_search_si_sources_deja_presentes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+    )
+
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Donne-moi le montant.",
+        llm=_LLMChamps(["montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    session.contexte.sources.append(_une_source(0.9))
+    etat = EtatGraphe(session=session)
+
+    nodes.noeud_extract(etat)
+
+    assert compteur_recherche[0] == 0
+    assert appels_extract[0]["document"] is None
+    assert "documents" not in appels_extract[0]
+
+
+def test_noeud_extract_relance_search_si_contexte_vide(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+    )
+
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Donne-moi le montant.",
+        llm=_LLMChamps(["montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    etat = EtatGraphe(session=session)
+
+    nodes.noeud_extract(etat)
+
+    assert compteur_recherche[0] == 1
+    assert appels_extract[0]["document"] is None
+
+
+def test_noeud_extract_passe_par_le_registre_et_journalise(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+    )
+
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
+    fabrique_extract, _ = _outil_extract_capture(resultat_extract)
+    fabrique_search, _ = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Donne-moi le montant.",
+        llm=_LLMChamps(["montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    etat = EtatGraphe(session=session)
+
+    nodes.noeud_extract(etat)
+
+    assert session.contexte.resultats[-1].outil == "extract"
+    assert session.etat.trace[-1].nom == "extract"
+    assert session.etat.trace[-1].donnees["succes"] is True
+    assert session.etat.trace[-1].donnees["champs_demandes"] == ["montant"]
 
 
 # ---------------------------------------------------------------------------
