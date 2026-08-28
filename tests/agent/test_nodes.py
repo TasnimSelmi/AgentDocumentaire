@@ -350,13 +350,36 @@ def test_noeud_summarize_sans_document_resolu_passe_documents_none(monkeypatch) 
     assert appels == [{"objectif": "Résume les éléments trouvés.", "documents": None}]
 
 
-def test_noeud_summarize_ambiguite_ne_choisit_pas_un_document_arbitraire(monkeypatch) -> None:
+def test_noeud_summarize_exact_appelle_summarize_une_fois_avec_un_document(monkeypatch) -> None:
+    perimetre = PerimetreDocumentaire(
+        statut="exact", valeurs_filtre=("doc-unique",), libelles=("Rapport unique",)
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
+    fabrique, appels = _outil_summarize_capture(resultat)
+
+    session = construire_session(
+        "Résume le document rapport_unique.pdf.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique],
+    )
+    nodes.noeud_summarize(EtatGraphe(session=session))
+
+    assert appels == [
+        {"objectif": "Résume le document rapport_unique.pdf.", "documents": ["doc-unique"]}
+    ]
+    assert session.etat.trace[-1].donnees["mode"] == "document_complet"
+
+
+def test_noeud_summarize_ambiguite_refuse_sans_appeler_summarize(monkeypatch) -> None:
     perimetre = PerimetreDocumentaire(
         statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
     )
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
 
-    resultat = ResultatOutil(outil="summarize", succes=False, message="échec")
+    resultat = ResultatOutil(outil="summarize", succes=False, message="ne doit pas être appelé")
     fabrique, appels = _outil_summarize_capture(resultat)
 
     session = construire_session(
@@ -365,11 +388,37 @@ def test_noeud_summarize_ambiguite_ne_choisit_pas_un_document_arbitraire(monkeyp
         charger_profil_domaine=False,
         fabriques=[fabrique],
     )
-    etat = EtatGraphe(session=session)
+    mise_a_jour = nodes.noeud_summarize(EtatGraphe(session=session))
 
-    nodes.noeud_summarize(etat)
+    # L'outil summarize N'EST PAS appelé : refus déterministe construit dans le nœud.
+    assert appels == []
+    assert mise_a_jour["reponse"].succes is False
+    assert "Rapport A" in mise_a_jour["reponse"].message
+    assert session.etat.trace[-1].donnees["mode"] == "document_vise_non_resolu"
 
-    assert appels[0]["documents"] is None
+
+def test_noeud_summarize_compatible_multi_documents_refuse_sans_appeler_summarize(monkeypatch) -> None:
+    perimetre = PerimetreDocumentaire(
+        statut="compatible",
+        valeurs_filtre=("doc-a", "doc-b", "doc-c"),
+        libelles=("Doc A", "Doc B", "Doc C"),
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    resultat = ResultatOutil(outil="summarize", succes=False, message="ne doit pas être appelé")
+    fabrique, appels = _outil_summarize_capture(resultat)
+
+    session = construire_session(
+        "Résume le document cquae_doc_219.txt.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique],
+    )
+    mise_a_jour = nodes.noeud_summarize(EtatGraphe(session=session))
+
+    assert appels == []  # jamais les 3 documents envoyés au map-reduce
+    assert mise_a_jour["reponse"].succes is False
+    assert session.etat.trace[-1].donnees["mode"] == "document_vise_non_resolu"
 
 
 def test_noeud_summarize_resolution_en_echec_ne_casse_pas_le_graphe(monkeypatch) -> None:

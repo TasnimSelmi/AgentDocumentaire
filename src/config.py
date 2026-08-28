@@ -523,6 +523,13 @@ def _modele_depuis_champs(
             # ailleurs exploitables. Elle est neutralisée en None, exactement
             # comme "" ci-dessus. Un champ de date obligatoire, lui, doit
             # continuer à échouer : on ne le neutralise pas.
+            #
+            # Même problème avec une année nue (ex. 1993, sur des documents
+            # à contenu historique où le LLM omet le format ISO complet) :
+            # reçue comme int/float, Pydantic l'interprète comme un
+            # timestamp/ordinal et lève `date_from_datetime_inexact`, une
+            # exception qui écartait tout le document. Neutralisée en None
+            # selon la même règle, sans jamais inventer de date (ex. year-01-01).
             # -----------------------------------------------------------
             if type_yaml == "date":
                 if valeur is None:
@@ -533,6 +540,9 @@ def _modele_depuis_champs(
                     except ValueError:
                         if not obligatoires[champ]:
                             valeurs[champ] = None
+                elif isinstance(valeur, (int, float)) and not isinstance(valeur, bool):
+                    if not obligatoires[champ]:
+                        valeurs[champ] = None
 
         return valeurs
 

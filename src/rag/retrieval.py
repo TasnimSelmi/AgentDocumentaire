@@ -602,6 +602,14 @@ _MOTIF_ANNEE = re.compile(r"^(19|20)\d{2}$")
 _SEUIL_RESOLUTION = 0.55
 _MARGE_RESOLUTION = 0.15
 
+# Fast-path « identifiant cité verbatim » (voir CatalogueDocuments.resoudre) :
+# bornes typiques autour d'un nom cité dans une phrase, et indice qu'un jeton
+# EST une référence d'identifiant (extension connue en fin, séparateur interne,
+# ou chiffre) plutôt qu'un mot ordinaire. Purement défensif : le juge final
+# reste `par_identifiant`, correspondance exacte.
+_BORNES_IDENTIFIANT = "\"'`()[]{}<>.,;:!?…“”«»"
+_INDICE_IDENTIFIANT = re.compile(r"[_\-/]|\.[A-Za-z0-9]{1,5}\Z|\d")
+
 # Distance maximale, en jetons, entre une année et le mot de publication qui
 # la qualifie (« 2021 annual financial statements »).
 _PORTEE_ANNEE = 3
@@ -904,12 +912,57 @@ class CatalogueDocuments:
                 return fiche
         return None
 
+    def _identifiant_exact_dans(self, requete: str) -> PerimetreDocumentaire | None:
+        """
+        Fast-path : un identifiant de document connu, cité VERBATIM dans la
+        requête (« … le document cquae_doc_219.txt. »), est résolu directement.
+
+        Motivation : la couverture lexicale (ci-dessous) échoue dès que des
+        noms de fichiers ne diffèrent que par un nombre — le nombre est jeté
+        comme non discriminant, et il ne reste qu'un préfixe commun partagé
+        par tout le corpus. `par_identifiant` (exact) sait déjà retrouver ces
+        documents ; ce fast-path ne fait que l'appeler AVANT le lexical.
+
+        Générique : ne dépend d'aucun préfixe ni corpus. Ne teste que les
+        jetons *en forme d'identifiant* (extension connue, séparateur interne
+        ou chiffre) et n'accepte qu'une correspondance EXACTE via
+        `par_identifiant`. Zéro correspondance, ou plusieurs documents
+        distincts visés : retourne None et laisse l'algorithme lexical
+        historique opérer, strictement inchangé.
+        """
+        fiches: list[FicheDocument] = []
+        vus: set[str] = set()
+        for brut in str(requete).split():
+            jeton = brut.strip(_BORNES_IDENTIFIANT)
+            if len(jeton) < 3 or not _INDICE_IDENTIFIANT.search(jeton):
+                continue
+            fiche = self.par_identifiant(jeton)
+            if fiche is not None and fiche.document_id not in vus:
+                vus.add(fiche.document_id)
+                fiches.append(fiche)
+
+        if len(fiches) != 1:
+            return None
+
+        fiche = fiches[0]
+        return self._perimetre(
+            [fiche],
+            statut="exact",
+            score=1.0,
+            jetons_reconnus=tuple(sorted(fiche.jetons)),
+            origine="identifiant_exact",
+        )
+
     # ------------------------------------------------------------ résolution
 
     def resoudre(self, requete: str) -> PerimetreDocumentaire:
         """Détermine le périmètre documentaire visé par une question."""
         if self.est_vide:
             return PerimetreDocumentaire(statut="aucun", raison="catalogue_vide")
+
+        exact = self._identifiant_exact_dans(requete)
+        if exact is not None:
+            return exact
 
         requete_normalisee = _normaliser_texte(requete)
         jetons_requete = requete_normalisee.split()

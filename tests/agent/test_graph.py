@@ -584,11 +584,11 @@ def test_D_summarize_appele_une_fois_search_jamais(monkeypatch):
 
 
 def test_E_documents_transmis_au_tool(monkeypatch):
-    """La désignation résolue arrive correctement dans documents=[...]."""
+    """La désignation résolue de façon UNIQUE arrive dans documents=[id]."""
     perimetre = PerimetreDocumentaire(
-        statut="compatible",
-        valeurs_filtre=("doc-a", "doc-b"),
-        libelles=("Rapport A", "Rapport B"),
+        statut="exact",
+        valeurs_filtre=("doc-a",),
+        libelles=("Rapport A",),
     )
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
 
@@ -597,15 +597,42 @@ def test_E_documents_transmis_au_tool(monkeypatch):
     fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_summarize)
 
     session = construire_session(
-        "Résume les rapports A et B en mettant l'accent sur les engagements climatiques.",
+        "Résume le rapport A en mettant l'accent sur les engagements climatiques.",
         llm=_LLMNonSollicite(),
         charger_profil_domaine=False,
         fabriques=[fabrique_search, fabrique_summarize],
     )
     _invoquer(session)
 
-    assert appels_summarize[0]["documents"] == ["doc-a", "doc-b"]
+    assert appels_summarize[0]["documents"] == ["doc-a"]
     assert "climatiques" in appels_summarize[0]["objectif"]
+
+
+def test_E2_perimetre_multi_documents_refuse_sans_appeler_summarize(monkeypatch):
+    """`compatible` multi-doc : refus déterministe, le map-reduce n'est jamais lancé."""
+    perimetre = PerimetreDocumentaire(
+        statut="compatible",
+        valeurs_filtre=("doc-a", "doc-b"),
+        libelles=("Rapport A", "Rapport B"),
+    )
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_summarize = ResultatOutil(outil="summarize", succes=True, message="ne doit pas être appelé")
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_summarize)
+
+    session = construire_session(
+        "Résume le document cquae_doc_219.txt.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_summarize],
+    )
+    reponse = _invoquer(session)
+
+    assert appels_summarize == []
+    assert compteur_recherche[0] == 0
+    assert reponse.succes is False
+    assert "Rapport A" in reponse.message
 
 
 def test_F_succes_devient_la_reponse_finale(monkeypatch):
@@ -707,12 +734,10 @@ def test_I_ambiguite_documentaire_conserve_le_refus(monkeypatch):
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
-    resultat_echec = ResultatOutil(
-        outil="summarize",
-        succes=False,
-        message="Aucune source documentaire n'est disponible. Utilise d'abord l'outil search.",
+    resultat_ne_doit_pas_servir = ResultatOutil(
+        outil="summarize", succes=False, message="ne doit pas être appelé",
     )
-    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_echec)
+    fabrique_summarize, appels_summarize = _outil_summarize_capture(resultat_ne_doit_pas_servir)
 
     session = construire_session(
         "Résume le rapport.",
@@ -722,10 +747,12 @@ def test_I_ambiguite_documentaire_conserve_le_refus(monkeypatch):
     )
     reponse = _invoquer(session)
 
-    assert reponse is resultat_echec
+    # Le refus est désormais construit dans le nœud : `summarize` n'est jamais
+    # appelé, `search` non plus, aucun document n'est choisi arbitrairement.
     assert reponse.succes is False
-    assert appels_summarize[0]["documents"] is None
+    assert appels_summarize == []
     assert compteur_recherche[0] == 0
+    assert "Rapport A" in reponse.message
 
 
 # ===========================================================================

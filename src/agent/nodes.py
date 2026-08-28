@@ -574,16 +574,25 @@ def noeud_summarize(etat: EtatGraphe) -> dict:
     comme `noeud_rechercher` le fait pour `search` : aucun appel direct à
     une fonction interne du tool.
 
-    Désignation du document : `summarize(documents=...)` attend des
-    identifiants déjà précis (`CatalogueDocuments.perimetre_explicite`), pas
-    du texte libre — voir `_resoudre_perimetre_document`.
+    Désignation du document : même discipline que `noeud_classify` /
+    `noeud_extract` (choix de ROUTAGE générique, indépendant de l'action) :
 
-    Si aucun document n'est identifié de façon fiable (périmètre non
-    contraignant, ou résolution en échec technique), `documents` reste
-    `None` : `summarize` retombe alors sur son mode historique (résumé des
-    sources déjà accumulées dans `ContexteOutil`, ou échec explicite s'il
-    n'y en a aucune) — jamais de repli silencieux vers `search`, jamais de
-    document choisi arbitrairement.
+        1. un seul document résolu de façon fiable (`perimetre.contraignant`,
+           un unique identifiant) : `summarize(documents=[id])`, mode document
+           complet.
+
+        2. requête visant explicitement un document mais résolution non
+           fiable — plusieurs candidats, périmètre ambigu, ou correspondance
+           sous le seuil (`_document_vise_sans_resolution_fiable`) : refus
+           déterministe construit ici, SANS appeler `summarize` ni `search`.
+           Aucun document n'est choisi implicitement : résumer N documents à
+           la place d'un seul serait factuellement trompeur et coûteux.
+
+        3. aucune référence documentaire dans la requête : comportement
+           historique inchangé — `summarize(documents=None)` retombe sur son
+           mode contextuel (résumé des sources déjà présentes dans
+           `ContexteOutil`, ou échec explicite s'il n'y en a aucune). Jamais
+           de repli vers `search`, jamais de document arbitraire.
 
     Pas de boucle de récupération pour un échec de `summarize` dans cette
     action : succès ou échec, le `ResultatOutil` devient directement la
@@ -593,24 +602,53 @@ def noeud_summarize(etat: EtatGraphe) -> dict:
     requete = session.etat.requete_courante
 
     perimetre, statut_resolution = _resoudre_perimetre_document(requete)
-    documents = (
-        list(perimetre.valeurs_filtre)
-        if perimetre is not None and perimetre.contraignant
-        else None
-    )
+    document: str | None = None
+    if (
+        perimetre is not None
+        and perimetre.contraignant
+        and len(perimetre.valeurs_filtre) == 1
+    ):
+        document = perimetre.valeurs_filtre[0]
 
-    resultat = session.executer_outil(
-        "summarize",
-        objectif=requete,
-        documents=documents,
-    )
+    if document is not None:
+        mode = "document_complet"
+        resultat = session.executer_outil(
+            "summarize",
+            objectif=requete,
+            documents=[document],
+        )
+    elif _document_vise_sans_resolution_fiable(perimetre):
+        mode = "document_vise_non_resolu"
+        candidats = ", ".join(perimetre.libelles) if perimetre.libelles else None
+        message = (
+            (
+                f"Plusieurs documents correspondent à la demande sans désignation "
+                f"fiable ({candidats}). Précise le document à résumer."
+            )
+            if candidats
+            else (
+                "Document à résumer non identifié de façon fiable. "
+                "Précise le document à résumer."
+            )
+        )
+        resultat = ResultatOutil.echec("summarize", message)
+        session.contexte.ajouter_resultat(resultat)
+    else:
+        mode = "contexte_existant"
+        resultat = session.executer_outil(
+            "summarize",
+            objectif=requete,
+            documents=None,
+        )
 
     session.etat.ajouter_trace(
         "summarize",
         "Résumé produit." if resultat.succes else "Résumé impossible.",
         succes=resultat.succes,
-        documents_demandes=documents,
+        documents_demandes=[document] if document else None,
+        document_demande=document,
         resolution_documentaire=statut_resolution,
+        mode=mode,
     )
 
     return {"session": session, "reponse": resultat}
