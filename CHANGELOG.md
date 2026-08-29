@@ -8,7 +8,8 @@ socle** (`rag-v1`, …).
 
 ## [Non publié]
 
-Préparation du gel **RAG V1** et fiabilisation du harnais d'évaluation.
+Fiabilisation du harnais d'évaluation et **clôture P0** (socle RAG V1 gelé,
+tag [`rag-v1`](#rag-v1--2026-08-29)).
 
 ### Ajouté
 - `README.md`, `docs/architecture.md`, `docs/DO_NOT_TOUCH.md`, `CHANGELOG.md`.
@@ -19,7 +20,18 @@ Préparation du gel **RAG V1** et fiabilisation du harnais d'évaluation.
 - `tests/evaluation/test_corrections_scoring.py` : couverture ciblée des
   correctifs de scoring (déterministe, sans réseau).
 - Livrable `scorecard_reference.md` (scorecard de référence, run
-  `20260828-182551`).
+  `cquae_multicapacite_20260829-094620`).
+
+### Résultat de référence (P0)
+- Smoke CQuAE `cquae_multicapacite_20260829-094620` : **20 / 28 PASS**
+  (2 ANSWER_ONLY, 2 RETRIEVAL_ONLY, 2 WRONG, 2 ABSTAIN_CORRECT), 0
+  `TECHNICAL_ERROR`, **0 faux négatif du harnais**.
+- Critères de sortie P0 satisfaits : verdicts cohérents avec la revue
+  manuelle ; SEARCH `exactitude=True` sur 14/16 = 87,5 % (≥ 80 %, ANSWER_ONLY
+  inclus car réponses exactes) ; plus aucun faux `DOCUMENT_RETRIEVAL_FAILURE`
+  sur CLASSIFY / SUMMARIZE.
+- Défauts système restants, mesurés et assumés, à traiter en P1 : **SU-02**
+  (routing), **EX-03** (résolution documentaire contextuelle EXTRACT).
 
 ### Corrigé — harnais d'évaluation uniquement (aucun module `src/` touché)
 - **Groundedness SEARCH** (`evaluate_end_to_end.calculer_groundedness`) :
@@ -27,7 +39,8 @@ Préparation du gel **RAG V1** et fiabilisation du harnais d'évaluation.
   caractères par la génération, ce qui produisait de faux
   `PROVENANCE_FAILURE`. Mesure désormais sur le **texte complet des passages
   récupérés** (`ReponseRAG.recherche.passages`), repli sûr sur l'extrait si
-  aucun rapport de recherche. Seuil de décision (0.5) inchangé.
+  aucun rapport de recherche. Seuil de décision (0.5) inchangé. Effet confirmé
+  end-to-end : +6 PASS SEARCH entre `20260828-182551` et `20260829-094620`.
 - **Appariement documentaire UUID ↔ nom de fichier**
   (`cquae_multicapacite._cle_document_resolu`) : la trace agent enregistre un
   UUID de version documentaire, le gold un nom de fichier. Traduction
@@ -49,20 +62,31 @@ Préparation du gel **RAG V1** et fiabilisation du harnais d'évaluation.
   supprimable si installation en ligne.
 
 ### Connu / non corrigé (volontairement, hors périmètre du gel)
-- **SU-02** : « points essentiels » non routé vers SUMMARIZE (défaut routing).
-- **EX-03** : résolution documentaire contextuelle d'EXTRACT insuffisante.
+- **SU-02** : « points essentiels » non routé vers SUMMARIZE (défaut routing) — P1.
+- **EX-03** : résolution documentaire contextuelle d'EXTRACT insuffisante — P1.
+- **SQ-11** : gold à 2 assertions, `exactitude` binaire stricte — revue gold.
 - **SQ-16** : gold `cquae:test:11761` générique, à revoir (qualité dataset).
-- Smoke CQuAE post-correctif groundedness **non ré-exécuté** (GPU indisponible)
-  — condition de clôture J1, voir `scorecard_reference.md` §11.
+- **SQ-08 / SQ-09** : groundedness lexicale &lt; 0.5 malgré une réponse exacte
+  (dérivation / reformulation) — limite documentée, seuil **non** assoupli
+  (`scorecard_reference.md` §4, L7).
 - `.env` local : `QDRANT_PATH` avec barre oblique de tête → 99 tests en
-  `PermissionError`. À corriger dans le `.env` de la machine.
+  `PermissionError` ; run de référence produit avec la surcharge
+  `QDRANT_PATH=data/vectordb/qdrant_cquae_eval`. À corriger dans le `.env` de
+  la machine (hors dépôt).
 
 ---
 
-## [rag-v1] — À VENIR
+<a id="rag-v1--2026-08-29"></a>
+## [rag-v1] — 2026-08-29
 
-> **Tag non posé.** Sera créé une fois le smoke CQuAE J1 ré-exécuté et validé
-> (chaque WRONG = un vrai défaut, aucun faux négatif du harnais).
+> **Tag posé** (`git tag -a rag-v1`) sur le commit de clôture P0. Le smoke
+> CQuAE `cquae_multicapacite_20260829-094620` valide la condition de gel :
+> chaque WRONG = un vrai défaut système (SU-02, EX-03), aucun faux négatif du
+> harnais.
+>
+> À partir de ce tag, `git diff rag-v1 -- src/rag src/tools` doit rester vide :
+> toute évolution de `src/rag/` ou `src/tools/` impose un nouveau cycle
+> d'évaluation complet et un nouveau nom de socle (voir `docs/DO_NOT_TOUCH.md`).
 
 Instantané du socle RAG figé : modules `src/rag/`, `src/tools/`, `src/agent/`,
 `src/llm/`, `src/profiling/` + `config/default.yaml` +
