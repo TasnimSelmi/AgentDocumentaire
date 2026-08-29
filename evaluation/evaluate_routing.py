@@ -70,8 +70,9 @@ TAXONOMIE: tuple[str, ...] = (
 )
 
 # Intentions que le routage actuel sait réellement produire.
+# COMPARE / SYNTHESIZE : implémentées en P1.5 (branches multi-document).
 INTENTIONS_IMPLEMENTEES: frozenset[str] = frozenset(
-    {"SEARCH", "SUMMARIZE", "CLASSIFY", "EXTRACT"}
+    {"SEARCH", "SUMMARIZE", "CLASSIFY", "EXTRACT", "COMPARE", "SYNTHESIZE"}
 )
 
 # Deux modes de mesure, JAMAIS fusionnés en un score unique :
@@ -182,26 +183,50 @@ def router_cas(
     - ``production_routing`` : appel des désambiguïsateurs bornés RÉELS du
       graphe avec `llm`. Prompts inchangés.
 
+    Puis (P1.5) applique le routing multi-document EXACTEMENT comme
+    `noeud_detecter_intention` :
+      1. précédence multi-document sur les zones grises — >= 2 références de
+         fichiers explicites + verbe compare/synthesize => on route direct,
+         sans passer par un désambiguïsateur ;
+      2. `nodes._appliquer_signal_multidoc` peut faire basculer une intention
+         SEARCH/SUMMARIZE vers COMPARE/SYNTHESIZE.
+    Aucune autre intention n'est touchée.
+
     Renvoie ``(routed_intent_majuscule, raw_detected, deferred_to_llm | None)``.
     """
     if mode not in MODES:
         raise ValueError(f"Mode inconnu : {mode!r} (attendu : {MODES}).")
 
     brut = nodes._detecter_intention(query)
+    signal = detecter_multidoc(query)
+
+    # 1. Précédence multi-document explicite sur les zones grises (§2.7).
+    multidoc_explicite = (
+        signal.is_multidoc
+        and len(signal.references_detectees) >= nodes.MINIMUM_REFERENCES_MULTIDOC
+        and signal.operation_hint in {"compare", "synthesize"}
+    )
+
+    if multidoc_explicite:
+        return signal.operation_hint.upper(), brut, None
+
     if brut not in _SENTINELLES_VERS_REPLI:
-        return brut.upper(), brut, None
+        intention, deferred = brut, None
+    else:
+        etiquette = _ETIQUETTE_SENTINELLE[brut]
+        if mode == MODE_DETERMINISTE:
+            intention, deferred = _SENTINELLES_VERS_REPLI[brut], etiquette
+        else:
+            if llm is None:
+                raise ValueError(
+                    "mode 'production_routing' exige un LLM (désambiguïsateurs bornés)."
+                )
+            intention = _SENTINELLE_VERS_DESAMBIGUISEUR[brut](llm, query)
+            deferred = etiquette
 
-    etiquette = _ETIQUETTE_SENTINELLE[brut]
-
-    if mode == MODE_DETERMINISTE:
-        return _SENTINELLES_VERS_REPLI[brut].upper(), brut, etiquette
-
-    if llm is None:
-        raise ValueError(
-            "mode 'production_routing' exige un LLM (désambiguïsateurs bornés)."
-        )
-    resolu = _SENTINELLE_VERS_DESAMBIGUISEUR[brut](llm, query)
-    return resolu.upper(), brut, etiquette
+    # 2. Bascule SEARCH/SUMMARIZE -> COMPARE/SYNTHESIZE, déterministe.
+    intention = nodes._appliquer_signal_multidoc(intention, signal)
+    return intention.upper(), brut, deferred
 
 
 # --------------------------------------------------------------------------

@@ -25,12 +25,15 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from src.agent.graph_state import EtatGraphe
+from src.agent.multidoc import detecter_multidoc
 from src.agent.session import SessionAgent
 from src.config import get_profil
 from src.llm.common import extraire_json_objet, invoquer_llm
 from src.rag.generation import ReponseRAG, generer_depuis_recherche, refuser_sans_generation
 from src.rag.retrieval import resoudre_document
 from src.tools.base import ResultatOutil
+from src.tools.compare import comparer
+from src.tools.synthesize import synthetiser_documents
 
 logger = logging.getLogger(__name__)
 
@@ -579,10 +582,40 @@ def _stagnation(session: SessionAgent, score_maximal: float) -> bool:
 # ===========================================================================
 
 
+# Intentions qu'un signal multi-document (P1.4) peut supplanter. On ne
+# détourne JAMAIS une demande explicite de classification ou d'extraction,
+# ni une zone grise non résolue.
+_INTENTIONS_SUPPLANTABLES_PAR_MULTIDOC = frozenset({"search", "summarize"})
+
+# Nombre minimal de références de fichiers explicites pour qu'un verbe de
+# comparaison/synthèse prenne la précédence sur une zone grise (P1.5, §2.7).
+MINIMUM_REFERENCES_MULTIDOC = 2
+
+
+def _appliquer_signal_multidoc(intention: str, signal: Any) -> str:
+    """
+    Routing minimal P1.5 : une intention SEARCH/SUMMARIZE bascule vers
+    COMPARE/SYNTHESIZE **uniquement** si le signal multi-document est
+    explicite (`is_multidoc` et `operation_hint` ∈ {compare, synthesize}).
+    Sinon l'intention est renvoyée intacte.
+
+    Fonction pure, partagée avec `evaluation.evaluate_routing` pour que le
+    banc mesure exactement le même routage.
+    """
+    if (
+        intention in _INTENTIONS_SUPPLANTABLES_PAR_MULTIDOC
+        and getattr(signal, "is_multidoc", False)
+        and getattr(signal, "operation_hint", "none") in {"compare", "synthesize"}
+    ):
+        return signal.operation_hint
+    return intention
+
+
 def noeud_detecter_intention(etat: EtatGraphe) -> dict:
     """
-    Premier nœud du graphe : SEARCH, SUMMARIZE, CLASSIFY ou EXTRACT (cette
-    action).
+    Premier nœud du graphe : SEARCH, SUMMARIZE, CLASSIFY, EXTRACT, ou —
+    depuis P1.5 — COMPARE / SYNTHESIZE lorsque le signal multi-document
+    (`src.agent.multidoc`, déterministe, sans LLM) l'indique explicitement.
 
     La détection lexicale (`_detecter_intention`) tranche seule dans
     l'immense majorité des cas, sans LLM. Deux zones grises, chacune
@@ -593,26 +626,56 @@ def noeud_detecter_intention(etat: EtatGraphe) -> dict:
         - énumération de plusieurs éléments sans verbe d'extraction ni motif
           structurel « champ : ? » (voir `_MARQUEURS_ENUMERATION`) ->
           `_desambiguiser_intention_search_extract`.
+
+    Le signal multi-document est appliqué APRÈS résolution des zones grises
+    (`_appliquer_signal_multidoc`) : il ne supplante que SEARCH/SUMMARIZE.
     """
     session = etat.session
     requete = session.etat.requete_courante
 
     intention = _detecter_intention(requete)
-    desambiguisation_llm = intention in {_AMBIGU_CLASSIFY, _AMBIGU_SEARCH_EXTRACT}
+    signal = detecter_multidoc(requete)
 
-    if intention == _AMBIGU_CLASSIFY:
+    # P1.5 — PRÉCÉDENCE MULTI-DOCUMENT SUR LES ZONES GRISES.
+    # Des références de fichiers explicites (>= 2) combinées à un verbe de
+    # comparaison / synthèse explicite ne constituent PAS une zone grise
+    # CLASSIFY/EXTRACT : on route directement vers compare/synthesize, SANS
+    # appeler de désambiguïsateur LLM. Cela couvre le cas où un mot comme
+    # « classification » / « catégorie » dans la requête ferait d'abord
+    # tomber `_detecter_intention` dans `_AMBIGU_CLASSIFY` (ou une énumération
+    # dans `_AMBIGU_SEARCH_EXTRACT`), que `_appliquer_signal_multidoc` ne
+    # supplanterait pas ensuite (il ne supplante que search / summarize).
+    multidoc_explicite = (
+        getattr(signal, "is_multidoc", False)
+        and len(getattr(signal, "references_detectees", ())) >= MINIMUM_REFERENCES_MULTIDOC
+        and getattr(signal, "operation_hint", "none") in {"compare", "synthesize"}
+    )
+
+    desambiguisation_llm = (
+        not multidoc_explicite
+        and intention in {_AMBIGU_CLASSIFY, _AMBIGU_SEARCH_EXTRACT}
+    )
+
+    if multidoc_explicite:
+        intention = signal.operation_hint
+    elif intention == _AMBIGU_CLASSIFY:
         intention = _desambiguiser_intention_classify(session.llm, requete)
     elif intention == _AMBIGU_SEARCH_EXTRACT:
         intention = _desambiguiser_intention_search_extract(session.llm, requete)
+
+    intention = _appliquer_signal_multidoc(intention, signal)
 
     session.etat.ajouter_trace(
         "intention",
         f"Intention détectée : {intention}.",
         intention=intention,
         desambiguisation_llm=desambiguisation_llm,
+        multidoc=signal.is_multidoc,
+        operation_hint=signal.operation_hint,
+        multidoc_explicite=multidoc_explicite,
     )
 
-    return {"session": session, "intention": intention}
+    return {"session": session, "intention": intention, "multidoc_signal": signal}
 
 
 def router_intention(etat: EtatGraphe) -> str:
@@ -631,6 +694,10 @@ def router_intention(etat: EtatGraphe) -> str:
         return "classify"
     if etat.intention == "extract":
         return "extract"
+    if etat.intention == "compare":
+        return "compare"
+    if etat.intention == "synthesize":
+        return "synthesize"
     return "rechercher"
 
 
@@ -963,6 +1030,94 @@ def noeud_extract(etat: EtatGraphe) -> dict:
     return {"session": session, "reponse": resultat}
 
 
+def _signal_multidoc_courant(etat: EtatGraphe, requete: str) -> Any:
+    """Réutilise le signal déjà calculé par `noeud_detecter_intention` ;
+    le recalcule (déterministe) uniquement en repli défensif."""
+    signal = getattr(etat, "multidoc_signal", None)
+    if signal is not None:
+        return signal
+    return detecter_multidoc(requete)
+
+
+def noeud_compare(etat: EtatGraphe) -> dict:
+    """
+    Branche COMPARE (P1.5). Compare 2 à 4 documents explicitement nommés par
+    l'utilisateur : MAP borné par document (contenu de CE document
+    uniquement) -> REDUCE inter-document -> `ResultatOutil` avec provenance
+    par document. Aucun search global. Résolution non fiable -> abstention
+    déterministe (jamais de repli vers `search`).
+    """
+    session = etat.session
+    requete = session.etat.requete_courante
+    signal = _signal_multidoc_courant(etat, requete)
+
+    resultat = comparer(
+        requete,
+        getattr(signal, "references_detectees", ()),
+        llm=session.llm,
+        profil_domaine=session.contexte.profil_domaine,
+    )
+    session.contexte.ajouter_resultat(resultat)
+
+    documents = tuple(resultat.donnees.get("comparaison", {}).get("documents", ())) \
+        if resultat.succes else ()
+
+    session.etat.ajouter_trace(
+        "compare",
+        "Comparaison produite." if resultat.succes else "Comparaison impossible.",
+        succes=resultat.succes,
+        references=list(getattr(signal, "references_detectees", ())),
+        documents_resolus=list(documents),
+        motif=resultat.donnees.get("motif"),
+    )
+
+    return {
+        "session": session,
+        "reponse": resultat,
+        "documents_resolus": documents,
+        "resultat_compare": resultat.donnees.get("comparaison") if resultat.succes else None,
+    }
+
+
+def noeud_synthesize(etat: EtatGraphe) -> dict:
+    """
+    Branche SYNTHESIZE (P1.5). Synthèse transversale de 2 à 4 documents
+    explicitement nommés : même structure MAP -> REDUCE que `noeud_compare`.
+    Les divergences entre documents sont conservées explicitement. Aucun
+    search global ; résolution non fiable -> abstention déterministe.
+    """
+    session = etat.session
+    requete = session.etat.requete_courante
+    signal = _signal_multidoc_courant(etat, requete)
+
+    resultat = synthetiser_documents(
+        requete,
+        getattr(signal, "references_detectees", ()),
+        llm=session.llm,
+        profil_domaine=session.contexte.profil_domaine,
+    )
+    session.contexte.ajouter_resultat(resultat)
+
+    documents = tuple(resultat.donnees.get("synthese", {}).get("documents", ())) \
+        if resultat.succes else ()
+
+    session.etat.ajouter_trace(
+        "synthesize",
+        "Synthèse produite." if resultat.succes else "Synthèse impossible.",
+        succes=resultat.succes,
+        references=list(getattr(signal, "references_detectees", ())),
+        documents_resolus=list(documents),
+        motif=resultat.donnees.get("motif"),
+    )
+
+    return {
+        "session": session,
+        "reponse": resultat,
+        "documents_resolus": documents,
+        "resultat_synthesize": resultat.donnees.get("synthese") if resultat.succes else None,
+    }
+
+
 def noeud_rechercher(etat: EtatGraphe) -> dict:
     """Consomme une tentative et exécute l'outil `search`."""
     session = etat.session
@@ -1266,6 +1421,8 @@ __all__ = [
     "noeud_summarize",
     "noeud_classify",
     "noeud_extract",
+    "noeud_compare",
+    "noeud_synthesize",
     "noeud_rechercher",
     "noeud_evaluer_preuves",
     "router_apres_evaluation",

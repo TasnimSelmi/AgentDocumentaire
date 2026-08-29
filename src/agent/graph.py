@@ -1,5 +1,6 @@
 """
-Graphe agentique : détecter_intention -> (SEARCH | SUMMARIZE | CLASSIFY | EXTRACT).
+Graphe agentique : détecter_intention ->
+    (SEARCH | SUMMARIZE | CLASSIFY | EXTRACT | COMPARE | SYNTHESIZE).
 
 Branche SEARCH — inchangée depuis le premier graphe (Action « graphe
 minimal ») :
@@ -19,6 +20,16 @@ Branche CLASSIFY (Action « classify Option E ») :
 Branche EXTRACT (Action 04) :
 
     extract -> répondre
+
+Branches COMPARE / SYNTHESIZE (P1.5) — activées uniquement quand le signal
+multi-document déterministe (`src.agent.multidoc`, P1.4) est explicite
+(`is_multidoc` + `operation_hint` ∈ {compare, synthesize}) :
+
+    compare   -> répondre     (MAP borné par document -> REDUCE inter-document)
+    synthesize -> répondre
+
+Aucune boucle, aucun planner, aucun ReAct : le routage reste 100 %
+déterministe et borné.
 
 Le routage est 100% déterministe, jamais confié au tool-calling du LLM : la
 fiabilité du function-calling de Qwen3 8B via Ollama n'est pas établie dans
@@ -48,6 +59,7 @@ from langgraph.graph import END, START, StateGraph
 from src.agent.graph_state import EtatGraphe
 from src.agent.nodes import (
     noeud_classify,
+    noeud_compare,
     noeud_detecter_intention,
     noeud_evaluer_preuves,
     noeud_extract,
@@ -55,6 +67,7 @@ from src.agent.nodes import (
     noeud_reformuler,
     noeud_rechercher,
     noeud_summarize,
+    noeud_synthesize,
     router_apres_evaluation,
     router_intention,
 )
@@ -77,6 +90,8 @@ def construire_graphe() -> Any:
     graphe.add_node("summarize", noeud_summarize)
     graphe.add_node("classify", noeud_classify)
     graphe.add_node("extract", noeud_extract)
+    graphe.add_node("compare", noeud_compare)
+    graphe.add_node("synthesize", noeud_synthesize)
 
     graphe.add_edge(START, "detecter_intention")
     graphe.add_conditional_edges(
@@ -87,6 +102,8 @@ def construire_graphe() -> Any:
             "summarize": "summarize",
             "classify": "classify",
             "extract": "extract",
+            "compare": "compare",
+            "synthesize": "synthesize",
         },
     )
     graphe.add_edge("rechercher", "evaluer_preuves")
@@ -103,6 +120,8 @@ def construire_graphe() -> Any:
     graphe.add_edge("summarize", END)
     graphe.add_edge("classify", END)
     graphe.add_edge("extract", END)
+    graphe.add_edge("compare", END)
+    graphe.add_edge("synthesize", END)
 
     return graphe.compile()
 
@@ -134,6 +153,11 @@ def invoquer_agent(
             - SUMMARIZE, CLASSIFY ou EXTRACT : un `ResultatOutil`
               (`src.tools.base`), le retour tel quel de l'outil
               correspondant (succès ou échec).
+            - COMPARE ou SYNTHESIZE (P1.5) : un `ResultatOutil` également —
+              `donnees["comparaison"]` / `donnees["synthese"]` porte la
+              structure typée, `sources` la provenance par document. En cas de
+              résolution documentaire non fiable, un `ResultatOutil` en échec
+              (abstention déterministe), jamais un repli vers SEARCH.
     """
     session = construire_session(requete, **kwargs_session)
 

@@ -65,5 +65,20 @@ class EtatGraphe:
     stagnation: bool = False
     intention: str | None = None
 
+    # --- P1.5 : branches multi-document COMPARE / SYNTHESIZE ---------------
+    # `multidoc_signal` : `SignalMultiDoc` (src.agent.multidoc), calculé par
+    #   `noeud_detecter_intention`. Typé `Any` pour ne pas coupler l'état à
+    #   ce module (même discipline que `dernier_rapport_recherche`).
+    # `documents_resolus` : libellés des documents réellement traités par la
+    #   branche compare/synthesize (vide si abstention).
+    # `resultat_compare` / `resultat_synthesize` : structure typée
+    #   (`ResultatCompare` / `ResultatSynthese`) du REDUCE, ou `None`.
+    #   `reponse` porte de son côté le `ResultatOutil` uniforme, comme pour
+    #   SUMMARIZE / CLASSIFY / EXTRACT — aucun couplage à `ReponseRAG`.
+    multidoc_signal: Any | None = None
+    documents_resolus: tuple[str, ...] = ()
+    resultat_compare: Any | None = None
+    resultat_synthesize: Any | None = None
+
 
 __all__ = ["EtatGraphe"]

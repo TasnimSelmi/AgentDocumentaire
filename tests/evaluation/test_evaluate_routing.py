@@ -292,11 +292,33 @@ def test_baseline_search_intact(rapport: er.RapportRoutage) -> None:
     assert rapport.par_intention["SEARCH"]["corrects"] == 24
 
 
-def test_deterministe_accuracy_plancher_post_p1_2(rapport: er.RapportRoutage) -> None:
-    """Baseline P1.1 = 0.569 ; après P1.2 (11 cas bande B) ~0.72 en
-    deterministic_only. Ce test est un PLANCHER anti-régression, pas un
-    objectif à optimiser."""
-    assert rapport.accuracy >= 0.69
+def test_deterministe_accuracy_plancher(rapport: er.RapportRoutage) -> None:
+    """Baseline P1.1 = 0.569 ; P1.2 ~0.72 ; P1.5 (branches COMPARE/SYNTHESIZE)
+    ~0.88 en deterministic_only. PLANCHER anti-régression, pas un objectif à
+    optimiser."""
+    assert rapport.accuracy >= 0.85
+
+
+def test_p1_5_compare_synthesize_routes_en_deterministe(rapport: er.RapportRoutage) -> None:
+    """Le signal multi-document P1.4 fait basculer RT-052..057 -> COMPARE et
+    RT-058..061 -> SYNTHESIZE, sans LLM."""
+    par_id = {r["id"]: r for r in rapport.resultats}
+    for n in range(52, 58):
+        assert par_id[f"RT-{n:03d}"]["routed_intent"] == "COMPARE", n
+    for n in range(58, 62):
+        assert par_id[f"RT-{n:03d}"]["routed_intent"] == "SYNTHESIZE", n
+    assert rapport.par_intention["COMPARE"]["accuracy"] == 1.0
+    assert rapport.par_intention["SYNTHESIZE"]["accuracy"] == 1.0
+
+
+def test_p1_5_naffecte_pas_rt017_018_023_030(rapport: er.RapportRoutage) -> None:
+    """Anti-faux-positifs multi-doc : un seul document, ou multi-doc sans
+    opération, ne bascule jamais vers COMPARE/SYNTHESIZE."""
+    par_id = {r["id"]: r for r in rapport.resultats}
+    assert par_id["RT-017"]["routed_intent"] == "SEARCH"
+    assert par_id["RT-018"]["routed_intent"] == "SEARCH"
+    assert par_id["RT-023"]["routed_intent"] == "SEARCH"  # is_multidoc mais hint none
+    assert par_id["RT-030"]["routed_intent"] == "SUMMARIZE"
 
 
 def test_bande_b_summarize_et_extract_resolus_en_deterministe(
@@ -321,10 +343,12 @@ def test_bande_b_classify_partiellement_deterministe(rapport: er.RapportRoutage)
     assert par_id["RT-040"]["raw_detected"] == "ambigu_classify"
 
 
-def test_intentions_non_implementees_echouent_toutes(rapport: er.RapportRoutage) -> None:
-    for intent in ("COMPARE", "SYNTHESIZE", "CLARIFY"):
-        assert intent not in er.INTENTIONS_IMPLEMENTEES
-        assert rapport.par_intention[intent]["corrects"] == 0
+def test_clarify_encore_non_implementee(rapport: er.RapportRoutage) -> None:
+    """CLARIFY reste hors périmètre (P1.5 ne l'implémente pas)."""
+    assert "CLARIFY" not in er.INTENTIONS_IMPLEMENTEES
+    assert rapport.par_intention["CLARIFY"]["corrects"] == 0
+    # COMPARE / SYNTHESIZE sont désormais implémentées.
+    assert {"COMPARE", "SYNTHESIZE"} <= er.INTENTIONS_IMPLEMENTEES
 
 
 # --------------------------------------------------------------------------

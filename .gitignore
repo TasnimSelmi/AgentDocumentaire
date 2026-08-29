@@ -9,10 +9,12 @@ __pycache__/
 .env
 
 #data
-evaluation/reports/
 profiles/
 
-evaluation/
+# Évaluation locale : le dossier evaluation/ (scripts, datasets, rapports)
+# n'est PAS versionné. Motif ancré à la racine pour ne PAS capturer
+# accidentellement tests/evaluation/, qui contient des tests du dépôt.
+/evaluation/
 
 # Preuves privées locales (jamais commitées)
 private_artifacts/
@@ -41,3 +43,7 @@ config/schemas/*_brouillon.yaml
 .idea/
 .DS_Store
 Thumbs.db
+
+
+
+tests/evaluation/
