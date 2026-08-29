@@ -61,6 +61,7 @@ from evaluation.common import (
     ensemble_jetons,
     horodatage,
     mesurer_couverture,
+    normaliser_texte,
 )
 
 logger = logging.getLogger("evaluation.cquae_multicapacite")
@@ -370,6 +371,34 @@ def _trace_outil(session: Any, nom: str) -> dict[str, Any]:
     return {}
 
 
+def _cle_document_resolu(identifiant: str) -> str:
+    """
+    Clé d'appariement documentaire tolérante à la forme de l'identifiant.
+
+    `noeud_classify` / `noeud_summarize` (src/agent/nodes.py, NON modifiés)
+    enregistrent dans la trace le `doc_id` réellement résolu — un UUID de
+    version documentaire (`identifiant_version_document`), jamais le nom de
+    fichier. Le gold CQuAE, lui, désigne un nom de fichier
+    (« cquae_doc_219.txt »). Comparer les deux via `cle_document` échoue
+    toujours. On traduit donc l'UUID en nom de fichier via le catalogue
+    documentaire (déjà construit pendant le run, lecture seule), avec repli
+    sur `cle_document` de l'identifiant brut si la traduction échoue (UUID
+    inconnu, catalogue indisponible) — jamais une exception.
+    """
+    identifiant = str(identifiant or "").strip()
+    if not identifiant:
+        return ""
+    try:
+        from src.rag.retrieval import catalogue
+
+        fiche = catalogue().par_identifiant(identifiant)
+        if fiche is not None and fiche.nom_fichier:
+            return cle_document(fiche.nom_fichier)
+    except Exception:  # noqa: BLE001 — repli sûr sur l'identifiant brut
+        pass
+    return cle_document(identifiant)
+
+
 def _jaccard(a: str, b: str) -> float:
     ta, tb = ensemble_jetons(a), ensemble_jetons(b)
     if not ta or not tb:
@@ -504,17 +533,58 @@ def _resultat_routing_failure(cas: CasSmoke, brut: dict[str, Any], detected: str
 
 
 def _associer_champ(label_attendu: str, donnees_extract: dict[str, Any]) -> str | None:
-    """Apparie un label attendu au champ réellement renvoyé par EXTRACT (paraphrasé par le LLM)."""
-    candidats = [
-        (cle, _jaccard(label_attendu, cle))
-        for cle in donnees_extract
-        if isinstance(donnees_extract.get(cle), dict)
-    ]
-    candidats = [c for c in candidats if c[1] > 0]
-    if not candidats:
+    """
+    Apparie un label gold au champ réellement renvoyé par EXTRACT (paraphrasé
+    par le LLM depuis la MÊME requête, donc généralement très proche).
+
+    Trois passes, de la plus stricte à la plus permissive :
+      1. égalité exacte après normalisation (casse, accents) ;
+      2. inclusion d'un libellé dans l'autre (le LLM abrège ou développe) ;
+      3. recouvrement lexical de Jaccard, avec un seuil (0.34) qui écarte les
+         appariements fortuits sur un seul jeton commun (« date », « année »…).
+    """
+    cles = [c for c in donnees_extract if isinstance(donnees_extract.get(c), dict)]
+    if not cles:
         return None
-    candidats.sort(key=lambda c: -c[1])
-    return candidats[0][0]
+
+    cible = normaliser_texte(label_attendu)
+
+    for cle in cles:  # 1. égalité exacte après normalisation
+        if normaliser_texte(cle) == cible:
+            return cle
+
+    for cle in cles:  # 2. inclusion d'un libellé dans l'autre
+        cle_norm = normaliser_texte(cle)
+        if cle_norm and (cle_norm in cible or cible in cle_norm):
+            return cle
+
+    candidats = sorted(  # 3. recouvrement lexical au-dessus du seuil
+        ((cle, _jaccard(label_attendu, cle)) for cle in cles),
+        key=lambda c: -c[1],
+    )
+    if candidats and candidats[0][1] >= 0.34:
+        return candidats[0][0]
+    return None
+
+
+def _valeur_champ_extrait(entree: dict[str, Any]) -> str:
+    """
+    Valeur textuelle d'un champ extrait, pour la mesure de précision.
+
+    `entree["valeur"]` n'est renseigné que lorsqu'une SEULE valeur a été
+    trouvée (src/tools/extract.py::_construire_resultat). Dès qu'un champ
+    porte plusieurs valeurs distinctes (pluralité légitime préservée par
+    l'outil), `valeur` vaut None : on retombe alors sur la concaténation des
+    `valeurs[].valeur`, sinon la précision serait mesurée sur une chaîne vide.
+    """
+    valeur = entree.get("valeur")
+    if valeur:
+        return str(valeur)
+    return " ".join(
+        str(v.get("valeur", ""))
+        for v in (entree.get("valeurs") or [])
+        if isinstance(v, dict)
+    )
 
 
 # ===========================================================================
@@ -643,9 +713,13 @@ def noter_extract(cas: CasSmoke, brut: dict[str, Any], gold_index: dict[str, Enr
     tout_ok = resultat.succes and sources_ok
     au_moins_un_desaccord_trouve = False
 
+    # Les champs extraits sont sous `donnees["extractions"]`, jamais à la
+    # racine de `donnees` (voir src/tools/extract.py::_construire_resultat).
+    extractions = resultat.donnees.get("extractions", {}) if resultat.succes else {}
+
     for champ in cas.champs or []:
-        cle = _associer_champ(champ["label"], resultat.donnees) if resultat.succes else None
-        entree = resultat.donnees.get(cle, {}) if cle else {}
+        cle = _associer_champ(champ["label"], extractions) if resultat.succes else None
+        entree = extractions.get(cle, {}) if cle else {}
         trouve = bool(entree.get("trouve"))
         detail: dict[str, Any] = {
             "champ_retourne": cle,
@@ -657,7 +731,7 @@ def noter_extract(cas: CasSmoke, brut: dict[str, Any], gold_index: dict[str, Enr
             au_moins_un_desaccord_trouve = True
         elif champ["trouve_attendu"] and champ.get("gold_qid"):
             gold = gold_index.get(champ["gold_qid"])
-            valeur = entree.get("valeur") or ""
+            valeur = _valeur_champ_extrait(entree)
             reference = f"{gold.expected_answer} {gold.evidence_text}" if gold else ""
             precision = _precision_valeur(valeur, reference)
             detail["precision_valeur"] = round(precision, 3)
@@ -750,7 +824,7 @@ def noter_classify(
             retrieval_status = provenance_status = answer_status = "INCONNU"
 
     else:
-        doc_demande_ok = cle_document(trace.get("document_demande") or "") == cle_document(
+        doc_demande_ok = _cle_document_resolu(trace.get("document_demande") or "") == cle_document(
             cas.source_document or ""
         )
         categorie = resultat.donnees.get("categorie") if resultat.succes else None
@@ -847,7 +921,7 @@ def noter_summarize(
     # --- A. Validation structurelle (déterministe) --------------------------
     document_demande = trace.get("documents_demandes") or []
     doc_ok = bool(document_demande) and any(
-        cle_document(d) == cle_document(cas.source_document or "") for d in document_demande
+        _cle_document_resolu(d) == cle_document(cas.source_document or "") for d in document_demande
     )
     aucun_search_interne = "search" not in outils
     sources = resultat.sources if resultat.succes else []

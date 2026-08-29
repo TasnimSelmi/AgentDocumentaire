@@ -432,7 +432,7 @@ def test_noter_extract_champ_trouve_pass():
     session = _FausseSession([_FausseEtape("intention", intention="extract", desambiguisation_llm=False)], ["extract"])
     resultat_outil = ResultatOutil(
         outil="extract", succes=True, message="ok",
-        donnees={"date bataille valmy": {"trouve": True, "valeur_unique": True, "valeur": "20 septembre 1792", "valeurs": []}},
+        donnees={"extractions": {"date bataille valmy": {"trouve": True, "valeur_unique": True, "valeur": "20 septembre 1792", "valeurs": []}}},
         sources=[SourceOutil(doc_id="d1", source="s", nom_fichier="cquae_doc_219.txt", extrait="...")],
     )
     resultat = noter_extract(cas, _brut(session, resultat_outil), _gold_index_reel())
@@ -449,7 +449,7 @@ def test_noter_extract_champ_absent_conforme():
     session = _FausseSession([_FausseEtape("intention", intention="extract", desambiguisation_llm=False)], ["extract"])
     resultat_outil = ResultatOutil(
         outil="extract", succes=True, message="Aucune information trouvée.",
-        donnees={"nom du bateau": {"trouve": False, "valeur_unique": False, "valeur": None, "valeurs": []}},
+        donnees={"extractions": {"nom du bateau": {"trouve": False, "valeur_unique": False, "valeur": None, "valeurs": []}}},
         sources=[],
     )
     resultat = noter_extract(cas, _brut(session, resultat_outil), _gold_index_reel())
@@ -466,7 +466,7 @@ def test_noter_extract_champ_invente_est_wrong():
     session = _FausseSession([_FausseEtape("intention", intention="extract", desambiguisation_llm=False)], ["extract"])
     resultat_outil = ResultatOutil(
         outil="extract", succes=True, message="ok",
-        donnees={"nom du bateau de christophe colomb": {"trouve": True, "valeur_unique": True, "valeur": "Santa Maria", "valeurs": []}},
+        donnees={"extractions": {"nom du bateau de christophe colomb": {"trouve": True, "valeur_unique": True, "valeur": "Santa Maria", "valeurs": []}}},
         sources=[SourceOutil(doc_id="d1", source="s", nom_fichier="cquae_doc_156.txt", extrait="...")],
     )
     resultat = noter_extract(cas, _brut(session, resultat_outil), _gold_index_reel())

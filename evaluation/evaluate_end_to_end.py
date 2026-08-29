@@ -107,19 +107,51 @@ def jetons_porteurs(texte: str) -> set[str]:
 
 def calculer_groundedness(reponse: ReponseRAG) -> float:
     """
-    Part des jetons porteurs de la réponse présents dans le contexte cité.
+    Part des jetons porteurs de la réponse présents dans le contexte récupéré.
 
-    Le contexte est reconstitué depuis `ReponseRAG.sources`, c'est-à-dire ce
-    que le pipeline a effectivement présenté au modèle, et non l'ensemble des
-    passages candidats.
+    Le contexte de référence est le TEXTE COMPLET des passages réellement
+    récupérés par la recherche (`reponse.recherche.passages`), et non
+    `SourceCitee.extrait`, tronqué à 320 caractères par la génération
+    (`src/rag/generation.py`, `extrait[:317] + "..."`). Mesurer l'ancrage sur
+    cet extrait tronqué faisait chuter mécaniquement la groundedness d'une
+    réponse pourtant entièrement soutenue par les passages :
+
+      - une information présente dans le passage cité mais au-delà du 320e
+        caractère comptait à tort comme non ancrée ;
+      - une information portée par un AUTRE passage récupéré que celui dont
+        l'extrait tronqué est affiché comptait elle aussi comme non ancrée.
+
+    Le dénominateur correct pour une mesure de fidélité (« la réponse
+    est-elle soutenue par ce que la recherche a ramené ? ») est l'ensemble
+    des passages récupérés — définition standard de la groundedness RAG.
+    Seul ce dénominateur est corrigé ici : le seuil de décision (0.5 dans
+    `cquae_multicapacite.noter_search`) est inchangé, et la métrique reste
+    stricte — un jeton porteur absent de TOUS les passages récupérés (valeur
+    inventée, date fabriquée, entité hors corpus) reste compté comme non
+    ancré.
+
+    Repli, uniquement quand aucun rapport de recherche n'est disponible
+    (`reponse.recherche is None` ou sans passage — cas d'un `ReponseRAG`
+    reconstruit hors pipeline) : union des `SourceCitee.extrait`, le
+    comportement historique, sans jamais lever d'exception.
+
+    Limite connue : la recherche peut ramener plus de passages que la
+    génération n'en a réellement inséré dans le contexte (budget de
+    caractères). Le harnais n'a pas accès aux passages effectivement inclus ;
+    l'écart est marginal en pratique (les passages sont déjà triés par
+    pertinence et le budget rarement atteint sur des documents courts).
     """
     porteurs = jetons_porteurs(reponse.reponse)
     if not porteurs:
         return 1.0  # Réponse sans contenu factuel : rien à ancrer.
 
     contexte: set[str] = set()
-    for source in reponse.sources:
-        contexte |= ensemble_jetons(source.extrait)
+    if reponse.recherche is not None and reponse.recherche.passages:
+        for passage in reponse.recherche.passages:
+            contexte |= ensemble_jetons(passage.texte)
+    else:
+        for source in reponse.sources:
+            contexte |= ensemble_jetons(source.extrait)
 
     if not contexte:
         return 0.0
