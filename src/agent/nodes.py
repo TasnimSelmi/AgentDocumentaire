@@ -321,6 +321,85 @@ Réponds uniquement avec un objet JSON strict :
 """
 
 
+# ==========================================================================
+# P1.2 — Extensions de vocabulaire de routage (étape "routing dédiée")
+# ==========================================================================
+#
+# Prévu par docs/DO_NOT_TOUCH.md §3. Corrige des lacunes de SOUS-détection
+# mesurées par evaluation/evaluate_routing.py (cas RT-028, RT-031..RT-034,
+# RT-038, RT-039, RT-041, RT-048, RT-049). Règles suivies :
+#
+#   - expressions MULTI-MOTS uniquement, jamais un jeton isolé : « type » ou
+#     « nature » seuls recréent exactement le faux positif que la zone grise
+#     _JETONS_CLASSIFY_AMBIGUS existe pour éviter ;
+#   - aucun vocabulaire métier, aucune liste de types de documents ;
+#   - l'invariant « SEARCH ne perd jamais un cas » est verrouillé par le banc
+#     (SEARCH 24/24) et par tests/agent/test_nodes.py.
+#
+# Comparées en sous-chaîne sur le texte normalisé, comme _BIGRAMMES_SUMMARIZE.
+
+# SUMMARIZE : demandes indirectes de synthèse d'un document.
+_EXPRESSIONS_SUMMARIZE = (
+    "points essentiels",
+    "idees principales",
+    "idee principale",
+    "grands axes",
+    "main takeaways",
+    "key takeaways",
+    "tl;dr",
+    "tl dr",
+    "tl-dr",
+)
+
+# CLASSIFY (sûr) : la requête porte explicitement sur le TYPE / la NATURE du
+# document LUI-MÊME (objet non ambigu : « ... de ce document »), ou demande
+# impérativement de le déterminer. Distinct de _JETONS_CLASSIFY_AMBIGUS, où
+# « catégorie »/« classification » nus peuvent désigner un fait du contenu.
+_EXPRESSIONS_CLASSIFY_SURES = (
+    "type de document",
+    "type de ce document",
+    "type de fichier",
+    "type de ce fichier",
+    "quel type de document",
+    "quel genre de document",
+    "nature de ce document",
+    "nature du document",
+    "nature de ce fichier",
+    "determine la nature de",
+    "determiner la nature de",
+    "determine le type de",
+    "determiner le type de",
+    "is this document a",
+    "type of document",
+    "kind of document",
+    "document type",
+)
+
+# CLASSIFY (ambigu) : « s'agit-il d'un X ou d'un Y ? » — souvent une
+# identification de type de document, mais aussi bien une question factuelle
+# (« s'agit-il d'un montant HT ou TTC ? »). Tranché par
+# _desambiguiser_intention_classify, jamais ici.
+_EXPRESSIONS_AMBIGU_CLASSIFY = (
+    "s'agit-il d'un",
+    "s'agit-il d'une",
+)
+
+# EXTRACT : verbe de récupération. Seul, « récupère » est ambigu (« récupère
+# le fichier joint ») ; combiné à une énumération, il désigne sans ambiguïté
+# une extraction structurée de plusieurs champs.
+_JETONS_EXTRACT_RECUPERATION = {
+    "recupere", "recuperer", "recuperez", "recuperons",
+    "recueille", "recueillir", "recueillez",
+}
+_EXPRESSIONS_EXTRACT_SURES = (
+    "recupere les champs",
+    "recuperer les champs",
+    "recupere les informations",
+    "recupere les valeurs",
+    "recupere les donnees",
+)
+
+
 def _normaliser_intention(texte: str) -> str:
     """Minuscule, sans accents — utilitaire local, l'agent ne dépend pas des
     fonctions privées du Core (`retrieval._normaliser_texte`)."""
@@ -346,21 +425,34 @@ def _detecter_intention(requete: str) -> str:
         return "summarize"
     if any(bigramme in normalisee for bigramme in _BIGRAMMES_SUMMARIZE):
         return "summarize"
+    if any(expression in normalisee for expression in _EXPRESSIONS_SUMMARIZE):
+        return "summarize"
 
     if ensemble_jetons & _JETONS_CLASSIFY_SURS:
         return "classify"
     if jetons and jetons[0] == _MOT_CLASSIFY_IMPERATIF:
         return "classify"
+    if any(expression in normalisee for expression in _EXPRESSIONS_CLASSIFY_SURES):
+        return "classify"
 
     if ensemble_jetons & _JETONS_CLASSIFY_AMBIGUS:
+        return _AMBIGU_CLASSIFY
+    if any(expression in normalisee for expression in _EXPRESSIONS_AMBIGU_CLASSIFY):
         return _AMBIGU_CLASSIFY
 
     if ensemble_jetons & _JETONS_EXTRACT_SURS:
         return "extract"
+    if any(expression in normalisee for expression in _EXPRESSIONS_EXTRACT_SURES):
+        return "extract"
     if _MOTIF_CHAMP_VALEUR.search(requete):
         return "extract"
 
-    if any(marqueur in normalisee for marqueur in _MARQUEURS_ENUMERATION):
+    marqueur_enumeration = any(
+        marqueur in normalisee for marqueur in _MARQUEURS_ENUMERATION
+    )
+    if marqueur_enumeration and (ensemble_jetons & _JETONS_EXTRACT_RECUPERATION):
+        return "extract"
+    if marqueur_enumeration:
         return _AMBIGU_SEARCH_EXTRACT
 
     return "search"

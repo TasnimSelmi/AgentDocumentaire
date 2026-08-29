@@ -575,6 +575,81 @@ def test_router_intention_route_vers_extract() -> None:
     assert nodes.router_intention(EtatGraphe(session=session, intention="extract")) == "extract"
 
 
+# ---------------------------------------------------------------------------
+# P1.2 — extensions de vocabulaire de routage (bande B du banc de routage)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "requete,attendu",
+    [
+        # SUMMARIZE — demandes indirectes (RT-028, RT-031..RT-034).
+        ("TL;DR de document_b.txt ?", "summarize"),
+        ("tl;dr", "summarize"),
+        ("Donne-moi les points essentiels du document rapport_alpha.pdf.", "summarize"),
+        ("Quelles sont les idées principales de ce rapport ?", "summarize"),
+        ("Give me the main takeaways from report_alpha.pdf.", "summarize"),
+        ("Quels sont les grands axes de essai_philo.pdf ?", "summarize"),
+        # CLASSIFY sûr — type / nature DU document (RT-038, RT-039, RT-041).
+        ("Quel est le type de ce document ?", "classify"),
+        ("Is this document a contract or a report?", "classify"),
+        ("Détermine la nature de contrat_2025.pdf.", "classify"),
+        # EXTRACT — verbe « récupère » + énumération (RT-048, RT-049).
+        (
+            "Récupère les champs fournisseur, date et montant dans facture_2025.pdf.",
+            "extract",
+        ),
+        ("Récupère le numéro de contrat et la date d'effet.", "extract"),
+    ],
+)
+def test_detecter_intention_extensions_p1_2(requete: str, attendu: str) -> None:
+    assert nodes._detecter_intention(requete) == attendu
+
+
+def test_detecter_intention_p1_2_sagit_il_reste_une_zone_grise() -> None:
+    # RT-040 : « s'agit-il d'un X ou d'un Y ? » n'est pas forcé lexicalement
+    # (risque de faux positif sur une question factuelle) — il passe par le
+    # désambiguïsateur borné.
+    assert (
+        nodes._detecter_intention("S'agit-il d'une facture ou d'un devis ?")
+        == nodes._AMBIGU_CLASSIFY
+    )
+
+
+@pytest.mark.parametrize(
+    "requete",
+    [
+        # Anti-faux-positifs explicitement listés pour P1.2 : ces questions
+        # factuelles ne doivent JAMAIS basculer vers summarize / classify /
+        # extract à cause des nouvelles expressions.
+        "Quels sont les points de contrôle mentionnés dans rapport_alpha.pdf ?",  # RT-015
+        "Combien de points sont listés dans ce document ?",  # RT-016
+        "Compare les deux méthodes décrites dans rapport_alpha.pdf.",  # RT-017
+        "Quels sont les points communs entre les deux approches présentées dans ce document ?",  # RT-018
+        "Quelle méthode d'extraction des logs est utilisée dans ce rapport ?",  # RT-020
+    ],
+)
+def test_detecter_intention_p1_2_anti_faux_positifs_restent_search(requete: str) -> None:
+    assert nodes._detecter_intention(requete) == "search"
+
+
+def test_detecter_intention_p1_2_classification_de_contenu_reste_zone_grise() -> None:
+    # RT-019 : « classification » nu = fait potentiel du contenu -> zone grise
+    # (repli déterministe = search). Les expressions P1.2 ne doivent pas la
+    # transformer en classify ferme.
+    assert (
+        nodes._detecter_intention(
+            "Quelle classification de risque est indiquée dans rapport_alpha.pdf ?"
+        )
+        == nodes._AMBIGU_CLASSIFY
+    )
+
+
+def test_detecter_intention_p1_2_recupere_seul_ne_force_pas_extract() -> None:
+    # « récupère » sans énumération de champs ne doit pas forcer EXTRACT.
+    assert nodes._detecter_intention("Récupère le rapport_alpha.pdf.") == "search"
+
+
 class _LLMChamps:
     def __init__(self, champs: list[str]) -> None:
         self._champs = champs

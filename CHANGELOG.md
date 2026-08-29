@@ -9,7 +9,9 @@ socle** (`rag-v1`, …).
 ## [Non publié]
 
 Fiabilisation du harnais d'évaluation et **clôture P0** (socle RAG V1 gelé,
-tag [`rag-v1`](#rag-v1--2026-08-29)).
+tag [`rag-v1`](#rag-v1--2026-08-29)), puis **P1.1** (banc de routage) et
+**P1.2** (correction des lacunes de routage SUMMARIZE / CLASSIFY / EXTRACT,
+dont **SU-02**).
 
 ### Ajouté
 - `README.md`, `docs/architecture.md`, `docs/DO_NOT_TOUCH.md`, `CHANGELOG.md`.
@@ -62,8 +64,9 @@ tag [`rag-v1`](#rag-v1--2026-08-29)).
   supprimable si installation en ligne.
 
 ### Connu / non corrigé (volontairement, hors périmètre du gel)
-- **SU-02** : « points essentiels » non routé vers SUMMARIZE (défaut routing) — P1.
-- **EX-03** : résolution documentaire contextuelle d'EXTRACT insuffisante — P1.
+- ~~**SU-02**~~ : **corrigé en P1.2** (voir section dédiée ci-dessous).
+- **EX-03** : résolution documentaire contextuelle d'EXTRACT insuffisante — P1
+  (seul WRONG restant au smoke CQuAE P1.2).
 - **SQ-11** : gold à 2 assertions, `exactitude` binaire stricte — revue gold.
 - **SQ-16** : gold `cquae:test:11761` générique, à revoir (qualité dataset).
 - **SQ-08 / SQ-09** : groundedness lexicale &lt; 0.5 malgré une réponse exacte
@@ -73,6 +76,104 @@ tag [`rag-v1`](#rag-v1--2026-08-29)).
   `PermissionError` ; run de référence produit avec la surcharge
   `QDRANT_PATH=data/vectordb/qdrant_cquae_eval`. À corriger dans le `.env` de
   la machine (hors dépôt).
+
+---
+
+## P1.1 — Banc de mesure du routage
+
+Instrument de mesure construit **avant** toute modification du routage.
+
+### Ajouté
+- `evaluation/data/routing_cases.jsonl` : **65 cas** de routage génériques
+  (FR + EN, ≥ 30 % hors histoire/culture, noms de documents fictifs). Couvre
+  SEARCH / SUMMARIZE / CLASSIFY / EXTRACT, les intentions futures
+  COMPARE / SYNTHESIZE / CLARIFY, les anti-faux-positifs et les zones grises
+  connues. Dossier `evaluation/data/` non suivi par git (cf. `.gitignore`).
+- `evaluation/evaluate_routing.py` : banc de mesure du **routage seul** (pas
+  la qualité de réponse). Deux modes, métriques **toujours séparées, jamais
+  fusionnées** :
+  - `deterministic_only` : `nodes._detecter_intention` seul, zones grises
+    repliées sur `search`. Aucun appel LLM / réseau / Qdrant.
+  - `production_routing` : zones grises résolues par **les désambiguïsateurs
+    bornés existants** (`nodes._desambiguiser_intention_*`), prompts inchangés.
+  Sorties : accuracy globale, accuracy par intention, matrice de confusion,
+  liste des cas échoués.
+- `tests/evaluation/test_evaluate_routing.py` : validité du dataset, unicité
+  des id, taxonomie, couverture (intentions / langues / domaines),
+  déterminisme du runner, absence d'appel LLM en `deterministic_only`.
+
+### Baseline mesuré (avant P1.2)
+- `deterministic_only` : **37 / 65 (56,9 %)**, SEARCH 24/24.
+- `production_routing` : **42 / 65 (64,6 %)**, SEARCH 24/24, EXTRACT 9/9.
+- 28 échecs classés : 14 « intention future non implémentée »
+  (COMPARE / SYNTHESIZE / CLARIFY), 11 « vraie lacune de routing » (bande B),
+  3 « ambiguïté légitime » — ces 3 (RT-042, RT-050, RT-051) **correctement
+  résolues en `production_routing`** par les désambiguïsateurs bornés.
+
+---
+
+## P1.2 — Correction des lacunes de routage (bande B) — **terminé**
+
+Étape « routing dédiée » prévue par [docs/DO_NOT_TOUCH.md](docs/DO_NOT_TOUCH.md)
+§3. Périmètre **strictement limité** aux 11 cas de la bande B du banc P1.1.
+
+### Corrigé — `src/agent/nodes.py`, bloc de détection d'intention uniquement
+- **SU-02 corrigé.** « Donne-moi les points essentiels du document … » et
+  variantes (« idées principales », « grands axes », « main takeaways »,
+  « TL;DR ») sont désormais routées vers **SUMMARIZE**. Ajout de
+  `_EXPRESSIONS_SUMMARIZE` (expressions multi-mots, jamais un jeton isolé).
+- **CLASSIFY** : « type / nature de (ce) document », « determine(r) la
+  nature / le type de », « is this document a … » routées vers **classify**
+  (`_EXPRESSIONS_CLASSIFY_SURES`). « s'agit-il d'un(e) … » (RT-040) routée
+  vers la **zone grise** `_AMBIGU_CLASSIFY` (`_EXPRESSIONS_AMBIGU_CLASSIFY`).
+- **EXTRACT** : « récupère » n'est un déclencheur **que combiné à une
+  énumération** (`_JETONS_EXTRACT_RECUPERATION`) ; « récupère les champs … »
+  est un déclencheur sûr (`_EXPRESSIONS_EXTRACT_SURES`). Corrige RT-048,
+  RT-049.
+- Aucun vocabulaire métier, aucune règle liée à CQuAE. `graph.py` **non
+  modifié**. `src/rag/` et `src/tools/` **inchangés depuis le tag `rag-v1`**
+  (`git diff rag-v1 -- src/rag src/tools` vide).
+
+### Tests — `tests/agent/test_nodes.py`
+- Paramétrage des 11 cas bande B + 5 anti-faux-positifs explicites
+  (RT-015/016/017/018/020 → `search`) + RT-019 / RT-040 confirmés en zone
+  grise + « récupère » seul ne force pas EXTRACT.
+
+### Routing après P1.2
+
+| Mode | SEARCH | SUMMARIZE | CLASSIFY | EXTRACT | Global |
+|---|---|---|---|---|---|
+| `deterministic_only` | **24/24** | 10/10 | 6/8 | 7/9 | 47/65 (72,3 %) |
+| `production_routing` | **24/24** | **10/10** | **8/8** | **9/9** | 51/65 (78,5 %) |
+
+- **RT-040** volontairement laissé en zone grise en `deterministic_only`
+  (repli `search` — forcer une règle lexicale « X ou Y ? » risquerait un faux
+  positif SEARCH), mais **correctement résolu en CLASSIFY en
+  `production_routing`** par le désambiguïsateur borné.
+- Bande B : **10/11** résolus en `deterministic_only`, **11/11** en
+  `production_routing`.
+- SEARCH **24/24 dans les deux modes, avant et après** — aucune régression.
+
+### Smoke CQuAE post-P1.2
+
+`evaluation/reports/cquae_multicapacite/cquae_p1_2.json` :
+
+| Verdict | réf. `20260829-094620` | **P1.2** |
+|---|---:|---:|
+| PASS | 20 | **21** |
+| ANSWER_ONLY | 2 | 3 |
+| RETRIEVAL_ONLY | 2 | 1 |
+| WRONG | 2 | **1** |
+| ABSTAIN_CORRECT | 2 | 2 |
+| TECHNICAL_ERROR | 0 | 0 |
+
+- **Un seul changement de routage sur les 28 cas** : `SU-02 : search → summarize`.
+  **SU-02 : WRONG → PASS.**
+- **Seul WRONG restant : EX-03** (hors périmètre P1.2).
+- Les bascules de verdict SEARCH (SQ-02, SQ-13 : PASS → ANSWER_ONLY ; SQ-09,
+  SQ-16 : → PASS) ont toutes `detected_tool = search` **inchangé** : variation
+  de `groundedness` autour du seuil 0.5 d'un run Ollama à l'autre (limite L7),
+  sans lien avec P1.2. Net SEARCH PASS inchangé.
 
 ---
 

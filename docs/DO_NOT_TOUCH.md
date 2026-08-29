@@ -69,20 +69,45 @@ complet — voir `scorecard_reference.md` §4 et
 | Fichier | Raison du gel |
 |---|---|
 | `src/agent/graph.py` | topologie du graphe LangGraph ; routage 100 % déterministe |
-| `src/agent/nodes.py` | détection d'intention (vocabulaire fermé), classifieurs LLM bornés, évaluation pertinence/suffisance, boucle reformulation, refus |
+| `src/agent/nodes.py` | classifieurs LLM bornés (prompts figés), évaluation pertinence/suffisance, boucle reformulation, refus. **Exception : le bloc de détection d'intention** (`_detecter_intention` et ses tables de vocabulaire) est la **surface sanctionnée de l'étape *routing* dédiée** — voir ci-dessous. |
 | `src/agent/state.py` | `EtatAgent` : budget de tentatives, trace |
 | `src/agent/session.py` | `SessionAgent` : assemblage, aucune décision, aucun prompt |
 | `src/agent/graph_state.py` | `EtatGraphe` porté par LangGraph |
 
-### Défauts système connus — à corriger dans une étape *routing* dédiée, PAS ici
+### Étape *routing* dédiée — `_detecter_intention` uniquement
 
-- **SU-02** : « points essentiels » / « points clés d'un document » non routé
-  vers SUMMARIZE (bigramme absent de `_BIGRAMMES_SUMMARIZE`).
+Le bloc de **détection d'intention** de `src/agent/nodes.py` (`_detecter_intention`
+et ses constantes de vocabulaire : `_JETONS_*`, `_BIGRAMMES_*`, `_EXPRESSIONS_*`,
+`_MARQUEURS_*`) peut évoluer **dans ce cadre précis**, sous conditions :
+
+- mesuré **avant / après** par `evaluation/evaluate_routing.py`
+  (`deterministic_only` **et** `production_routing`, métriques jamais fusionnées) ;
+- **SEARCH ne perd jamais un cas** (invariant vérifié : SEARCH 24/24) ;
+- expressions multi-mots, aucun vocabulaire métier, aucune règle liée à un corpus ;
+- **prompts** des désambiguïsateurs LLM bornés **inchangés** ;
+- `graph.py`, `state.py`, `session.py`, `graph_state.py` **non touchés** ;
+- tests ajoutés avec la correction ; re-run du smoke CQuAE pour non-régression ;
+- consigné dans [../CHANGELOG.md](../CHANGELOG.md).
+
+Tout le reste de `nodes.py` (prompts, boucle QA, refus) reste **gelé**.
+
+### Défauts système — suivi
+
+- ~~**SU-02**~~ — **corrigé (P1.2, 2026-08-29)**. « points essentiels »,
+  « idées principales », « grands axes », « main takeaways », « TL;DR » routées
+  vers SUMMARIZE via `_EXPRESSIONS_SUMMARIZE`. Smoke CQuAE : SU-02 WRONG → PASS,
+  0 régression de routage. Routing `production_routing` après P1.2 :
+  SEARCH 24/24, SUMMARIZE 10/10, CLASSIFY 8/8, EXTRACT 9/9.
+  - **RT-040** (« s'agit-il d'un X ou d'un Y ? ») volontairement laissé en
+    **zone grise** en `deterministic_only` (repli `search`) — une règle
+    lexicale « X ou Y ? » risquerait un faux positif SEARCH — mais
+    correctement résolu en **CLASSIFY** en `production_routing` par le
+    désambiguïsateur borné.
 - **EX-03** : résolution documentaire **contextuelle** d'EXTRACT (requête sans
-  document nommé) plus faible que celle de CLASSIFY/SUMMARIZE.
-
-Ces défauts sont **visibles et assumés** dans `scorecard_reference.md`. Ils ne
-justifient aucune retouche du socle avant l'étape prévue.
+  document nommé) plus faible que celle de CLASSIFY/SUMMARIZE. **Non corrigé**
+  — seul WRONG restant au smoke CQuAE P1.2. Reste visible et assumé
+  (`scorecard_reference.md`). Toute correction relève d'une étape dédiée, pas
+  d'une retouche opportuniste du socle.
 
 ---
 
