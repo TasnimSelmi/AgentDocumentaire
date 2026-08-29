@@ -53,6 +53,7 @@ from evaluation.common import (
     lire_jsonl,
 )
 from src.agent import nodes
+from src.agent.multidoc import detecter_multidoc
 
 # --------------------------------------------------------------------------
 # Constantes
@@ -395,6 +396,104 @@ def _afficher(rapport: RapportRoutage) -> None:
 
 
 # --------------------------------------------------------------------------
+# Mesure P1.4 — détecteur multi-document (indépendante du routing)
+# --------------------------------------------------------------------------
+#
+# Mesure SÉPARÉE, jamais fusionnée avec l'accuracy de routing. Ne modifie pas
+# l'`expected_intent` produit par le routeur. Ne porte que sur les cas munis
+# d'un champ `expected_multidoc` (RT-017/018/023/030 + RT-052..061).
+# P1.4 mesure le signal préparatoire ; P1.5 branchera réellement le routing.
+
+
+def evaluer_multidoc(cas: list[dict[str, Any]]) -> dict[str, Any]:
+    sous_ensemble = [c for c in cas if "expected_multidoc" in c]
+    resultats: list[dict[str, Any]] = []
+    detection_ok = 0
+    hint_ok = 0
+    exact_ok = 0
+
+    for c in sous_ensemble:
+        attendu_multi = bool(c["expected_multidoc"])
+        attendu_op = str(c.get("expected_operation", "none"))
+        signal = detecter_multidoc(str(c["query"]))
+
+        d_ok = signal.is_multidoc == attendu_multi
+        h_ok = signal.operation_hint == attendu_op
+        detection_ok += d_ok
+        hint_ok += h_ok
+        exact_ok += d_ok and h_ok
+
+        resultats.append(
+            {
+                "id": str(c.get("id", "")),
+                "query": str(c["query"]),
+                "expected_multidoc": attendu_multi,
+                "detected_multidoc": signal.is_multidoc,
+                "expected_operation": attendu_op,
+                "detected_operation": signal.operation_hint,
+                "nombre_documents": signal.nombre_documents,
+                "references_detectees": list(signal.references_detectees),
+                "marqueur_pluriel": signal.marqueur_pluriel,
+                "confiance": signal.confiance,
+                "correct": d_ok and h_ok,
+                "raison": signal.raison,
+            }
+        )
+
+    total = len(sous_ensemble)
+    erreurs = [r for r in resultats if not r["correct"]]
+    return {
+        "total": total,
+        "detection_correcte": detection_ok,
+        "detection_accuracy": round(detection_ok / total, 4) if total else 0.0,
+        "operation_hint_correcte": hint_ok,
+        "operation_hint_accuracy": round(hint_ok / total, 4) if total else 0.0,
+        "exact_correct": exact_ok,
+        "exact_accuracy": round(exact_ok / total, 4) if total else 0.0,
+        "erreurs": erreurs,
+        "resultats": resultats,
+    }
+
+
+def _afficher_multidoc(bloc: dict[str, Any]) -> None:
+    largeur = 78
+    print("=" * largeur)
+    print("MESURE P1.4 — détecteur multi-document (mesure séparée, hors routing)")
+    print("=" * largeur)
+    print(f"Sous-ensemble    : {bloc['total']} cas (RT-017/018/023/030 + RT-052..061)")
+    print(
+        f"Détection is_multidoc : {bloc['detection_accuracy']:.1%} "
+        f"({bloc['detection_correcte']}/{bloc['total']})"
+    )
+    print(
+        f"operation_hint       : {bloc['operation_hint_accuracy']:.1%} "
+        f"({bloc['operation_hint_correcte']}/{bloc['total']})"
+    )
+    print(
+        f"exact (les deux)     : {bloc['exact_accuracy']:.1%} "
+        f"({bloc['exact_correct']}/{bloc['total']})"
+    )
+    print()
+    print("Détail")
+    print("-" * largeur)
+    for r in bloc["resultats"]:
+        etat = "ok " if r["correct"] else "XX "
+        print(
+            f"  {etat}{r['id']:<7} multidoc {str(r['detected_multidoc']):<5}"
+            f"(att {str(r['expected_multidoc']):<5}) "
+            f"hint {r['detected_operation']:<10}(att {r['expected_operation']})"
+        )
+    if bloc["erreurs"]:
+        print()
+        print(f"Erreurs ({len(bloc['erreurs'])})")
+        print("-" * largeur)
+        for r in bloc["erreurs"]:
+            print(f"  {r['id']} « {r['query']} »")
+            print(f"      raison: {r['raison']}")
+    print("=" * largeur)
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -470,15 +569,23 @@ def main(argv: list[str] | None = None) -> int:
             _afficher(rapports[mode])
             print()
 
-    # Sérialisation : chaque mode conserve son propre bloc. Aucun score
-    # combiné n'est jamais calculé.
+    # Mesure P1.4 — détecteur multi-document, déterministe et indépendante du
+    # mode de routing : calculée une seule fois.
+    bloc_multidoc = evaluer_multidoc(charger_cas(args.jsonl))
+    if not args.quiet:
+        _afficher_multidoc(bloc_multidoc)
+        print()
+
+    # Sérialisation : chaque mode conserve son propre bloc ; la mesure
+    # multi-doc est un bloc distinct. Aucun score combiné n'est jamais calculé.
     if args.mode == "both":
-        charge: dict[str, Any] = {m: rapports[m].vers_dict() for m in MODES}
+        routing_charge: Any = {m: rapports[m].vers_dict() for m in MODES}
         defaut = DOSSIER_RAPPORTS_ROUTAGE / f"routing_both_{horodatage()}.json"
     else:
-        charge = rapports[args.mode].vers_dict()
+        routing_charge = rapports[args.mode].vers_dict()
         defaut = DOSSIER_RAPPORTS_ROUTAGE / f"routing_{args.mode}_{horodatage()}.json"
 
+    charge: dict[str, Any] = {"routing": routing_charge, "multidoc": bloc_multidoc}
     ecrit = _ecrire_json(charge, args.json or defaut)
     if not args.quiet:
         print(f"Rapport JSON écrit : {ecrit}")

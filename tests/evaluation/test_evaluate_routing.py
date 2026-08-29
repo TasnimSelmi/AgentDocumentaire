@@ -56,6 +56,11 @@ def rapport(cas: list[dict]) -> er.RapportRoutage:
     return er.evaluer(cas, dataset="test")
 
 
+@pytest.fixture(scope="module")
+def bloc_multidoc(cas: list[dict]) -> dict:
+    return er.evaluer_multidoc(cas)
+
+
 # --------------------------------------------------------------------------
 # 1. Validité du dataset
 # --------------------------------------------------------------------------
@@ -320,3 +325,80 @@ def test_intentions_non_implementees_echouent_toutes(rapport: er.RapportRoutage)
     for intent in ("COMPARE", "SYNTHESIZE", "CLARIFY"):
         assert intent not in er.INTENTIONS_IMPLEMENTEES
         assert rapport.par_intention[intent]["corrects"] == 0
+
+
+# --------------------------------------------------------------------------
+# 7. Mesure P1.4 — détecteur multi-document (bloc séparé, hors routing)
+# --------------------------------------------------------------------------
+
+
+def test_multidoc_sous_ensemble_present(bloc_multidoc: dict, cas: list[dict]) -> None:
+    assert bloc_multidoc["total"] == 14
+    ids = {r["id"] for r in bloc_multidoc["resultats"]}
+    assert {"RT-017", "RT-018", "RT-023", "RT-030"} <= ids
+    assert {f"RT-{n:03d}" for n in range(52, 62)} <= ids
+    # La mesure n'altère pas expected_intent : les cases restent celles du banc.
+    par_id = {c["id"]: c for c in cas}
+    assert par_id["RT-052"]["expected_intent"] == "COMPARE"
+
+
+def test_multidoc_detection_parfaite(bloc_multidoc: dict) -> None:
+    """Critère de sortie : sous-ensemble multi-doc >= 95 %."""
+    assert bloc_multidoc["detection_accuracy"] >= 0.95
+    assert bloc_multidoc["operation_hint_accuracy"] >= 0.95
+    assert bloc_multidoc["exact_accuracy"] >= 0.95
+
+
+def test_multidoc_rt017_rt018_restent_mono(bloc_multidoc: dict) -> None:
+    par_id = {r["id"]: r for r in bloc_multidoc["resultats"]}
+    for cid in ("RT-017", "RT-018"):
+        assert par_id[cid]["detected_multidoc"] is False, cid
+        assert par_id[cid]["detected_operation"] == "none", cid
+
+
+def test_multidoc_rt030_synthetiser_un_doc_reste_mono(bloc_multidoc: dict) -> None:
+    par_id = {r["id"]: r for r in bloc_multidoc["resultats"]}
+    assert par_id["RT-030"]["detected_multidoc"] is False
+    assert par_id["RT-030"]["detected_operation"] == "none"
+
+
+def test_multidoc_rt052_057_signales_compare(bloc_multidoc: dict) -> None:
+    par_id = {r["id"]: r for r in bloc_multidoc["resultats"]}
+    for n in range(52, 58):
+        r = par_id[f"RT-{n:03d}"]
+        assert r["detected_multidoc"] is True, r["id"]
+        assert r["detected_operation"] == "compare", r["id"]
+
+
+def test_multidoc_rt058_061_signales_synthesize(bloc_multidoc: dict) -> None:
+    par_id = {r["id"]: r for r in bloc_multidoc["resultats"]}
+    for n in range(58, 62):
+        r = par_id[f"RT-{n:03d}"]
+        assert r["detected_multidoc"] is True, r["id"]
+        assert r["detected_operation"] == "synthesize", r["id"]
+
+
+def test_multidoc_rt023_multidoc_sans_operation(bloc_multidoc: dict) -> None:
+    par_id = {r["id"]: r for r in bloc_multidoc["resultats"]}
+    assert par_id["RT-023"]["detected_multidoc"] is True
+    assert par_id["RT-023"]["detected_operation"] == "none"
+
+
+def test_multidoc_deterministe(cas: list[dict]) -> None:
+    assert er.evaluer_multidoc(cas) == er.evaluer_multidoc(cas)
+
+
+def test_multidoc_aucun_faux_positif_sur_les_autres_cas_search(cas: list[dict]) -> None:
+    """En dehors du sous-ensemble tagué, seul RT-064 (« these reports », un
+    CLARIFY vague) déclenche is_multidoc — avec operation_hint none, ce qui
+    est correct et inoffensif."""
+    from src.agent.multidoc import detecter_multidoc
+
+    tagues_true = {"RT-023", *(f"RT-{n:03d}" for n in range(52, 62))}
+    faux_positifs = []
+    for c in cas:
+        if c["id"] in tagues_true:
+            continue
+        if detecter_multidoc(c["query"]).is_multidoc:
+            faux_positifs.append(c["id"])
+    assert faux_positifs == ["RT-064"], faux_positifs

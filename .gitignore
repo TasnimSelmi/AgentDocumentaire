@@ -12,6 +12,8 @@ __pycache__/
 evaluation/reports/
 profiles/
 
+evaluation/
+
 # Preuves privées locales (jamais commitées)
 private_artifacts/
 #claude
