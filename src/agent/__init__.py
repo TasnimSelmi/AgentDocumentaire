@@ -27,7 +27,13 @@ Ou, pour la boucle complète recherche/reformulation/réponse déjà orchestrée
     reponse = invoquer_agent("Quelles sont les conditions de résiliation ?")
 """
 
-from src.agent.graph import EtatGraphe, construire_graphe, invoquer_agent
+from src.agent.graph import (
+    AgentResponse,
+    EtatGraphe,
+    construire_graphe,
+    executer_agent,
+    invoquer_agent,
+)
 from src.agent.session import (
     ErreurSession,
     SessionAgent,
@@ -51,6 +57,8 @@ __all__ = [
     "ErreurEtatAgent",
     "BudgetTentativesEpuise",
     "invoquer_agent",
+    "executer_agent",
+    "AgentResponse",
     "construire_graphe",
     "EtatGraphe",
 ]

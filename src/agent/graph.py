@@ -57,6 +57,11 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from src.agent.graph_state import EtatGraphe
+from src.agent.response import (
+    STATUT_ERREUR,
+    AgentResponse,
+    normaliser_reponse_agent,
+)
 from src.agent.nodes import (
     noeud_classify,
     noeud_compare,
@@ -175,8 +180,59 @@ def invoquer_agent(
     return resultat["reponse"]
 
 
+def executer_agent(
+    requete: str,
+    **kwargs_session: Any,
+) -> AgentResponse:
+    """
+    Point d'entrée PUBLIC de l'agent — renvoie le contrat unique
+    `AgentResponse` (`src.agent.response`).
+
+    Enveloppe FINE autour du graphe déjà compilé : elle exécute exactement le
+    MÊME graphe que `invoquer_agent` (routage, capacités, RAG V1 inchangés),
+    puis normalise le résultat final de façon déterministe. `invoquer_agent`
+    reste disponible et inchangé (retour brut `ReponseRAG` / `ResultatOutil`)
+    pour la compatibilité arrière — migration progressive.
+
+    Choix d'intégration : adaptateur APRÈS `graph.invoke()` plutôt que nœud
+    final LangGraph. L'état final du graphe (`reponse`, `intention`,
+    `preuves_pertinentes/suffisantes`, `documents_resolus`) porte déjà tout ce
+    qu'il faut ; un nœud final imposerait de modifier la topologie (6 arêtes)
+    et `EtatGraphe`. L'adaptateur ne touche ni le graphe, ni les nœuds, ni les
+    tools.
+
+    Une exception non gérée du graphe -> `AgentResponse(status="error")` : un
+    refus fonctionnel (document introuvable, budget dépassé, preuves
+    insuffisantes…) n'en est PAS une, il ressort en `status="refusal"`.
+    """
+    session = construire_session(requete, **kwargs_session)
+    recursion_limit = max(25, session.etat.max_tentatives * 3 + 5)
+
+    try:
+        etat_final = _GRAPHE.invoke(
+            EtatGraphe(session=session),
+            config={"recursion_limit": recursion_limit},
+        )
+    except Exception as exc:  # noqa: BLE001 — vrai échec technique -> status="error"
+        return AgentResponse(
+            status=STATUT_ERREUR,
+            capability="",
+            error={"code": type(exc).__name__, "message": str(exc)},
+        )
+
+    return normaliser_reponse_agent(
+        etat_final.get("reponse"),
+        capability=str(etat_final.get("intention") or ""),
+        preuves_pertinentes=etat_final.get("preuves_pertinentes"),
+        preuves_suffisantes=etat_final.get("preuves_suffisantes"),
+        documents_resolus=etat_final.get("documents_resolus") or (),
+    )
+
+
 __all__ = [
     "EtatGraphe",
+    "AgentResponse",
     "construire_graphe",
     "invoquer_agent",
+    "executer_agent",
 ]
