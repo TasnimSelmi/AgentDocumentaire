@@ -1126,10 +1126,16 @@ def test_extract_E_implicite_route_vers_extract(monkeypatch):
     """
     « Donne-moi le fournisseur, la date et le montant total. » (aucun verbe
     d'extraction) doit être routée vers EXTRACT via la désambiguïsation
-    bornée, exactement comme le veut la mission.
+    bornée. Ici un document est résolu de façon unique et fiable : le
+    routage EXTRACT aboutit au mode document complet (comme le cas explicite
+    `test_extract_D`), ce qui prouve la bascule d'intention.
     """
     monkeypatch.setattr(
-        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+        nodes,
+        "resoudre_document",
+        lambda requete: PerimetreDocumentaire(
+            statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",)
+        ),
     )
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
@@ -1147,10 +1153,44 @@ def test_extract_E_implicite_route_vers_extract(monkeypatch):
     reponse = _invoquer(session)
 
     assert reponse is resultat_extract
+    assert appels_extract[0]["documents"] == ["doc-a"]
     assert appels_extract[0]["champs"] == ["fournisseur", "date", "montant total"]
-    # Aucun document explicitement visé : mode contextuel, search interne
-    # au plus une fois (comportement historique, contexte vide au départ).
-    assert compteur_recherche[0] == 1
+    # Document résolu de façon fiable : jamais de search interne.
+    assert compteur_recherche[0] == 0
+
+
+def test_extract_E2_implicite_sans_document_fiable_refuse_sans_search(monkeypatch):
+    """
+    Même requête implicite, mais aucun document identifiable de façon fiable :
+    le routage EXTRACT a bien eu lieu (intention journalisée), et P1.6 impose
+    un refus déterministe — jamais de `search` global ni d'appel à `extract`.
+    """
+    monkeypatch.setattr(
+        nodes,
+        "resoudre_document",
+        lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance"),
+    )
+
+    fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+
+    llm = _LLMExtractPipeline(intention="EXTRACT", champs=["fournisseur", "date", "montant total"])
+
+    session = construire_session(
+        "Donne-moi le fournisseur, la date et le montant total.",
+        llm=llm,
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    reponse = _invoquer(session)
+
+    intentions = [e.donnees.get("intention") for e in session.etat.trace if e.nom == "intention"]
+    assert intentions == ["extract"]
+    assert appels_extract == []
+    assert compteur_recherche[0] == 0
+    assert reponse.succes is False
+    assert "Précise le document" in reponse.message
 
 
 def test_extract_F_ambiguite_documentaire_conserve_le_refus(monkeypatch):

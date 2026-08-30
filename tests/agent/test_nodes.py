@@ -1034,12 +1034,51 @@ def test_noeud_extract_document_introuvable_refuse_sans_search(monkeypatch) -> N
     assert mise_a_jour["reponse"].succes is False
 
 
-def test_noeud_extract_ne_relance_pas_search_si_sources_deja_presentes(monkeypatch) -> None:
+def test_noeud_extract_aucun_document_fiable_refuse_sans_search_ni_extract(monkeypatch) -> None:
+    """
+    P1.6 — aucune référence documentaire fiable (`statut="aucun"`,
+    `raison != "score_insuffisant"`) : refus déterministe. Ni `search` global,
+    ni `extract` : EXTRACT ne fabrique pas de périmètre à partir d'un top-k.
+    """
     monkeypatch.setattr(
-        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+        nodes,
+        "resoudre_document",
+        lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance"),
     )
 
-    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+
+    session = construire_session(
+        "Donne-moi le montant.",
+        llm=_LLMChamps(["montant"]),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_extract],
+    )
+    etat = EtatGraphe(session=session)
+
+    mise_a_jour = nodes.noeud_extract(etat)
+
+    assert appels_extract == []
+    assert compteur_recherche[0] == 0
+    assert mise_a_jour["reponse"].succes is False
+    assert "Précise le document" in mise_a_jour["reponse"].message
+
+
+def test_noeud_extract_ne_choisit_jamais_un_document_depuis_un_top_k(monkeypatch) -> None:
+    """
+    Même sans document nommé, des sources déjà présentes dans le contexte (un
+    éventuel top-k d'un search antérieur) ne doivent JAMAIS servir de
+    périmètre implicite : refus, aucun `search`, aucun `extract`.
+    """
+    monkeypatch.setattr(
+        nodes,
+        "resoudre_document",
+        lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance"),
+    )
+
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
     fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
     fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
@@ -1052,42 +1091,21 @@ def test_noeud_extract_ne_relance_pas_search_si_sources_deja_presentes(monkeypat
     session.contexte.sources.append(_une_source(0.9))
     etat = EtatGraphe(session=session)
 
-    nodes.noeud_extract(etat)
+    mise_a_jour = nodes.noeud_extract(etat)
 
+    assert appels_extract == []
     assert compteur_recherche[0] == 0
-    assert appels_extract[0]["document"] is None
-    assert "documents" not in appels_extract[0]
+    assert mise_a_jour["reponse"].succes is False
 
 
-def test_noeud_extract_relance_search_si_contexte_vide(monkeypatch) -> None:
+def test_noeud_extract_journalise_le_refus_aucun_document_fiable(monkeypatch) -> None:
     monkeypatch.setattr(
-        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+        nodes,
+        "resoudre_document",
+        lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance"),
     )
 
-    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
-    fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
-    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
-
-    session = construire_session(
-        "Donne-moi le montant.",
-        llm=_LLMChamps(["montant"]),
-        charger_profil_domaine=False,
-        fabriques=[fabrique_search, fabrique_extract],
-    )
-    etat = EtatGraphe(session=session)
-
-    nodes.noeud_extract(etat)
-
-    assert compteur_recherche[0] == 1
-    assert appels_extract[0]["document"] is None
-
-
-def test_noeud_extract_passe_par_le_registre_et_journalise(monkeypatch) -> None:
-    monkeypatch.setattr(
-        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
-    )
-
-    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
     fabrique_extract, _ = _outil_extract_capture(resultat_extract)
     fabrique_search, _ = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
@@ -1103,7 +1121,8 @@ def test_noeud_extract_passe_par_le_registre_et_journalise(monkeypatch) -> None:
 
     assert session.contexte.resultats[-1].outil == "extract"
     assert session.etat.trace[-1].nom == "extract"
-    assert session.etat.trace[-1].donnees["succes"] is True
+    assert session.etat.trace[-1].donnees["succes"] is False
+    assert session.etat.trace[-1].donnees["mode"] == "aucun_document_fiable"
     assert session.etat.trace[-1].donnees["champs_demandes"] == ["montant"]
 
 

@@ -69,7 +69,7 @@ complet — voir `scorecard_reference.md` §4 et
 | Fichier | Raison du gel |
 |---|---|
 | `src/agent/graph.py` | topologie du graphe LangGraph ; routage 100 % déterministe |
-| `src/agent/nodes.py` | classifieurs LLM bornés (prompts figés), évaluation pertinence/suffisance, boucle reformulation, refus. **Exception : le bloc de détection d'intention** (`_detecter_intention` et ses tables de vocabulaire) est la **surface sanctionnée de l'étape *routing* dédiée** — voir ci-dessous. |
+| `src/agent/nodes.py` | classifieurs LLM bornés (prompts figés), évaluation pertinence/suffisance, boucle reformulation, refus. **Exception : le bloc de détection d'intention** (`_detecter_intention` et ses tables de vocabulaire) est la **surface sanctionnée de l'étape *routing* dédiée** — voir ci-dessous. `noeud_extract` a été ouvert ponctuellement pour la correction P1.6 (défaut EX-03) puis refermé — voir « Défauts système — suivi ». |
 | `src/agent/state.py` | `EtatAgent` : budget de tentatives, trace |
 | `src/agent/session.py` | `SessionAgent` : assemblage, aucune décision, aucun prompt |
 | `src/agent/graph_state.py` | `EtatGraphe` porté par LangGraph |
@@ -103,11 +103,26 @@ Tout le reste de `nodes.py` (prompts, boucle QA, refus) reste **gelé**.
     lexicale « X ou Y ? » risquerait un faux positif SEARCH — mais
     correctement résolu en **CLASSIFY** en `production_routing` par le
     désambiguïsateur borné.
-- **EX-03** : résolution documentaire **contextuelle** d'EXTRACT (requête sans
-  document nommé) plus faible que celle de CLASSIFY/SUMMARIZE. **Non corrigé**
-  — seul WRONG restant au smoke CQuAE P1.2. Reste visible et assumé
-  (`scorecard_reference.md`). Toute correction relève d'une étape dédiée, pas
-  d'une retouche opportuniste du socle.
+- ~~**EX-03**~~ — **traité (P1.6, 2026-08-30)** comme étape dédiée. La
+  résolution documentaire **contextuelle** d'EXTRACT (requête sans document
+  nommé) est **supprimée** : `noeud_extract` ne fait plus de repli
+  `search` global -> `extract(document=None)`. Ce repli transformait une
+  recherche multi-document en extraction structurée implicite dès que le
+  top-k ne faisait ressortir qu'un seul document (choix de périmètre par
+  convenance, non déterministe d'un corpus à l'autre). Nouvel invariant :
+  EXTRACT n'extrait que sur un périmètre résolu de façon **unique et
+  fiable** (`PerimetreDocumentaire` contraignant à une seule valeur) ;
+  sinon refus déterministe demandant de préciser le document, sans jamais
+  appeler `search` ni `extract`. CLASSIFY/SUMMARIZE **inchangés** (mode
+  contextuel conservé) : divergence volontaire, propre à EXTRACT.
+
+  **Ouverture explicite et temporaire du gel** : `src/agent/nodes.py::noeud_extract`
+  (fonction et docstring uniquement) a été ouvert pour cette seule
+  correction P1.6, puis **refermé**. Aucune autre partie de `nodes.py`
+  (prompts, classifieurs LLM bornés, boucle QA, refus RAG, autres nœuds)
+  n'a été touchée. `graph.py`, `state.py`, `session.py`, `graph_state.py`,
+  `src/rag/**`, `src/tools/**` non touchés. Tests génériques ajoutés dans
+  `tests/agent/test_nodes.py` (aucune dépendance CQuAE).
 
 ---
 

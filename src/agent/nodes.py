@@ -952,14 +952,23 @@ def noeud_extract(etat: EtatGraphe) -> dict:
     Exécute l'outil `extract` via le registre (Action 04), exactement comme
     `noeud_classify` le fait pour `classify`.
 
-    Réutilise DÉLIBÉRÉMENT le même critère de routage document-complet vs
-    contextuel que `noeud_classify` (document résolu de façon unique et
-    fiable -> mode document complet, sans search ; requête visant
-    explicitement un document mais résolution non fiable -> refus
-    déterministe, sans search ni appel à `extract` ; aucune référence
-    documentaire -> mode contextuel historique, search si le contexte est
-    vide) : c'est un choix de ROUTAGE générique, indépendant de la nature de
-    l'action, déjà validé deux fois (CLASSIFY, et implicitement SUMMARIZE).
+    Réutilise DÉLIBÉRÉMENT le critère de routage de `noeud_classify` pour les
+    deux premiers cas (document résolu de façon unique et fiable -> mode
+    document complet, sans search ; requête visant explicitement un document
+    mais résolution non fiable -> refus déterministe, sans search ni appel à
+    `extract`).
+
+    Troisième cas — aucune référence documentaire fiable : depuis P1.6,
+    EXTRACT diverge volontairement de CLASSIFY/SUMMARIZE. Plus aucun repli
+    `search` global suivi d'une `extract(document=None)`. Ce repli
+    transformait une recherche multi-document en extraction structurée
+    implicite dès que le top-k ne faisait ressortir qu'un seul document —
+    un choix de périmètre par convenance, non déterministe d'un corpus à
+    l'autre (défaut EX-03). EXTRACT n'accepte donc un périmètre que
+    lorsqu'il est résolu de façon unique et fiable ; sinon, refus
+    déterministe demandant de préciser le document, sans jamais appeler
+    `search` ni `extract`.
+
     L'AGRÉGATION, elle, reste spécifique à extract (déduplication de
     valeurs, jamais un vote majoritaire — voir `src.tools.extract`, qui ne
     réutilise aucune logique de `classify`).
@@ -1007,15 +1016,19 @@ def noeud_extract(etat: EtatGraphe) -> dict:
         resultat = ResultatOutil.echec("extract", message)
         session.contexte.ajouter_resultat(resultat)
     else:
-        mode = "contexte_existant"
-        if not session.a_des_preuves:
-            session.executer_outil("search", requete=requete)
-
-        resultat = session.executer_outil(
+        # Périmètre "aucun" pour toute autre raison que "score_insuffisant"
+        # (typiquement "aucune_correspondance") : la requête ne désigne
+        # aucun document de façon fiable. P1.6 — plus de repli
+        # `search` global -> `extract(document=None)` : EXTRACT ne reçoit un
+        # périmètre que résolu de façon unique et fiable (branche
+        # `document_complet`). Refus déterministe, sans `search` ni `extract`.
+        mode = "aucun_document_fiable"
+        resultat = ResultatOutil.echec(
             "extract",
-            champs=champs,
-            document=None,
+            "Aucun document n'a pu être identifié de façon fiable pour cette "
+            "extraction. Précise le document sur lequel extraire.",
         )
+        session.contexte.ajouter_resultat(resultat)
 
     session.etat.ajouter_trace(
         "extract",
