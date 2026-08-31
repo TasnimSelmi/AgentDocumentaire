@@ -1,5 +1,5 @@
 """
-Tests de la capacité SYNTHESIZE (P1.5) — `src.tools.synthesize`.
+Tests de la capacité SYNTHESIZE (P1.5) — `src.agent.synthesize`.
 
 Aucun Ollama, aucun Qdrant. Le REDUCE ne reçoit que les sorties MAP
 validées. Les divergences entre documents sont conservées explicitement.
@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from src.agent import multidoc_pipeline
-from src.tools.synthesize import ResultatSynthese, synthetiser_documents
+from tools.synthesize import ResultatSynthese, synthetiser_documents
 from tests.agent._multidoc_fakes import (
     SANS_EVIDENCE,
     LLMScripte,

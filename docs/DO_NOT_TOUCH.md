@@ -126,7 +126,70 @@ Tout le reste de `nodes.py` (prompts, boucle QA, refus) reste **gelé**.
 
 ---
 
-## 4. Gelé — configuration de référence
+## 4. Gelé — couche sources documentaires P2.2 (`src/sources/`)
+
+> Gelée à la clôture **P2.2** (2026-08-31). Découple l'origine des documents du
+> pipeline d'ingestion **sans** modifier `src/rag/**` ni le cœur P1.
+
+| Fichier | Rôle gelé |
+|---|---|
+| `src/sources/base.py` | contrat public `DocumentSource` + `ErreurSource` + invariant de snapshot |
+| `src/sources/snapshot.py` | `SnapshotDocumentSource` : staging → publication atomique d'un snapshot complet |
+| `src/sources/local.py` | `LocalDocumentSource` : adaptateur local MVP (pass-through du dossier) |
+| `src/sources/service.py` | `IngestionService.sync()` : façade d'ingestion P2 |
+| `src/sources/__init__.py` | surface publique du paquet |
+
+### Contrat public
+
+- **`DocumentSource.materialiser() -> AbstractContextManager[Path]`** : la seule
+  opération. Le `Path` exposé est **toujours un snapshot complet et cohérent**
+  de la source — jamais partiel, jamais en cours de construction. En cas
+  d'impossibilité, `ErreurSource` est levée **avant** le `yield` (le pipeline
+  n'est pas appelé).
+- **`LocalDocumentSource`** — adaptateur local MVP : la source *est* un dossier
+  déjà présent. `materialiser()` rend le dossier **tel quel** (aucune copie) ;
+  `inventaire()` (hors contrat) réutilise `decouvrir_fichiers` du socle.
+  `IngestionService().sync(LocalDocumentSource(d))` ≡ `ingerer(dossier=d)`.
+- **`SnapshotDocumentSource`** — base imposée pour toute future source
+  distante. Une sous-classe n'implémente que `_recuperer(staging)` ;
+  `materialiser()` hérité construit la nouvelle matérialisation **à l'écart**,
+  ne remplace le miroir publié qu'**après succès complet** et **atomiquement**,
+  et laisse le miroir précédent **intact** en cas d'échec.
+- **`IngestionService.sync(source, *, reinitialiser, limite, inferer,
+  nom_profil)`** — façade d'ingestion P2 : un **seul** appel à
+  `ingerer(dossier=…)`, options transmises telles quelles, `RapportIngestion`
+  renvoyé intact.
+
+### Invariants normatifs
+
+- **Aucune** future source (API entreprise, GED, SharePoint, S3, montage
+  distant…) ne contourne cette couche pour écrire dans l'index ou pour toucher
+  `src/rag/**`. Elle implémente `DocumentSource` — via `SnapshotDocumentSource`
+  si la récupération est faillible — et passe par `IngestionService.sync()`.
+- **Une récupération partielle ou en échec ne doit JAMAIS être assimilée à une
+  suppression documentaire.** Le socle lit « présent au registre, absent du
+  répertoire » comme une suppression ; n'exposer au pipeline qu'un snapshot
+  **garanti complet**. Tout doute (récupération incomplète, staging vide sans
+  `autoriser_snapshot_vide`) ⇒ `ErreurSource`, rien n'est publié, l'index reste
+  tel quel.
+- Le pipeline reçoit un **`Path` de répertoire**, jamais des `bytes` ni un
+  `stream` (loaders gelés path-based, OCR, détection de changement de
+  `RegistreFichiers` keyée par chemin).
+- `src/rag/**` et le cœur P1 (`graph.py`, `nodes.py`, `state.py`, `session.py`,
+  `graph_state.py`) restent **gelés** : cette couche les **appelle**, ne les
+  modifie pas. `git diff rag-v1 -- src/rag` doit rester **vide**.
+
+### Modification légitime
+
+Comme pour les §1–§3 : correction de défaut documentée dans
+[../CHANGELOG.md](../CHANGELOG.md), tests dans `tests/sources/`, sans toucher
+`src/rag/**` ni le cœur P1. Ajouter une source concrète (connecteur entreprise)
+= **nouveau fichier** implémentant le contrat, jamais une modification des cinq
+fichiers ci-dessus. Voir [P2.2_SOURCES.md](P2.2_SOURCES.md).
+
+---
+
+## 5. Gelé — configuration de référence
 
 | Élément | Valeur gelée |
 |---|---|
@@ -140,7 +203,7 @@ Changer une de ces valeurs = nouveau socle + re-mesure complète.
 
 ---
 
-## 5. Modifiable SANS toucher au socle
+## 6. Modifiable SANS toucher au socle
 
 - **`evaluation/`** — harnais de mesure. Consomme les points d'entrée publics
   de `src/`, n'en importe aucune logique interne. C'est **ici** que se
@@ -153,11 +216,14 @@ Changer une de ces valeurs = nouveau socle + re-mesure complète.
 - **`scripts/`** — démos et utilitaires hors chemin de production.
 - Nouveaux modules pour les chantiers post-gel (routing avancé,
   multi-document, service, API, UI) **tant qu'ils n'éditent pas** les fichiers
-  des §1–§4 : ils doivent les appeler, pas les modifier.
+  des §1–§5 : ils doivent les appeler, pas les modifier. Les connecteurs de
+  sources documentaires (API / GED entreprise) implémentent le contrat de la
+  §4 et passent par `IngestionService.sync()` — ils ne touchent ni `src/rag/**`
+  ni `src/sources/**`.
 
 ---
 
-## 6. Fichier à ne pas déplacer
+## 7. Fichier à ne pas déplacer
 
 `test_rag.py` (racine) — fournit `comparer_reponse` / `TOLERANCE_RELATIVE`,
 importés par `evaluation/evaluate_end_to_end.py`,

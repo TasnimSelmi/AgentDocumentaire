@@ -34,6 +34,7 @@ from src.agent.graph import (
     executer_agent,
     invoquer_agent,
 )
+from src.agent.service import AgentService
 from src.agent.session import (
     ErreurSession,
     SessionAgent,
@@ -59,6 +60,7 @@ __all__ = [
     "invoquer_agent",
     "executer_agent",
     "AgentResponse",
+    "AgentService",
     "construire_graphe",
     "EtatGraphe",
 ]

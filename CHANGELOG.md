@@ -9,11 +9,131 @@ socle** (`rag-v1`, …).
 ## [Non publié]
 
 Fiabilisation du harnais d'évaluation et **clôture P0** (socle RAG V1 gelé,
-tag [`rag-v1`](#rag-v1--2026-08-29)), puis **P1.1** (banc de routage) et
-**P1.2** (correction des lacunes de routage SUMMARIZE / CLASSIFY / EXTRACT,
-dont **SU-02**).
+tag [`rag-v1`](#rag-v1--2026-08-29)), puis **P1.1** (banc de routage),
+**P1.2** (lacunes de routage SUMMARIZE / CLASSIFY / EXTRACT, dont **SU-02**),
+**P1.3** (contrat de sortie public `AgentResponse`), **P1.4** (détecteur
+multi-document déterministe), **P1.5** (capacités COMPARE / SYNTHESIZE),
+**P1.6** (défaut **EX-03** — résolution documentaire contextuelle d'EXTRACT
+supprimée), **P1.7** (validation finale, cœur agentique **candidat au gel**),
+**P2.1** (façade applicative `AgentService`) et **P2.2** (abstraction générique
+des sources documentaires).
 
-### Ajouté
+### P1.3 — contrat de sortie public `AgentResponse` (`src/agent/response.py`)
+- Point d'entrée public `executer_agent(requete)` → `AgentResponse`
+  (`status` / `capability` / `answer` / `sources` / `citations` / `warnings` /
+  `data` / `metadata` / `error`). Enveloppe **fine** après `graph.invoke()` :
+  même graphe que `invoquer_agent`, puis normalisation **100 % déterministe,
+  aucun appel LLM, aucune reconstruction de provenance**.
+- `status="refusal"` (abstention fonctionnelle) strictement distinct de
+  `status="error"` (exception technique non prévue). Aucun prompt,
+  raisonnement, contenu intégral de document ou objet non sérialisable dans la
+  sortie. `tests/agent/test_response.py` (17 tests).
+
+### P1.4 — détecteur multi-document (`src/agent/multidoc.py`)
+- Fonction **pure et déterministe** (0 LLM, 0 retrieval) : `is_multidoc` +
+  `operation_hint ∈ {compare, synthesize, none}` à partir du seul texte
+  (références de fichiers, marqueurs pluriels sur nom de document, marqueurs
+  comparatifs / de synthèse, garde-fou déixis singulière). Bilingue FR/EN,
+  aucun nom de document en dur. Mesuré par `evaluate_routing` (14/14).
+
+### P1.5 — capacités COMPARE / SYNTHESIZE
+- `src/agent/multidoc_pipeline.py` : MAP par document (couverture **intégrale**,
+  lots bornés, citations `[D<k>S<j>]`) → REDUCE inter-document qui ne voit que
+  les MAP validées. Bornes techniques : `LIMITE_DOCUMENTS=4`, `NB_LOTS_MAX=24`,
+  `PROFONDEUR_MAX_AGREGATION=3`, `budget_caracteres_entree_llm()` (source
+  unique, contrôle avant chaque envoi). **Aucun search global, aucun repli
+  SEARCH** ; abstention déterministe à chaque étape ; divergences /
+  contradictions conservées explicitement.
+- `src/tools/compare.py`, `src/tools/synthesize.py` : nouvelles façades
+  `lecture_seule`. Nouveaux nœuds `noeud_compare` / `noeud_synthesize` +
+  arêtes ; routage supplanté seulement depuis SEARCH / SUMMARIZE, jamais
+  depuis une demande CLASSIFY / EXTRACT explicite.
+- `evaluation/multidoc_benchmark.py` (hors ligne, LLM scripté) : **12/12**.
+
+### P1.6 — défaut EX-03 (résolution documentaire contextuelle d'EXTRACT)
+- `noeud_extract` : plus aucun repli `search` global → `extract(document=None)`.
+  Ce repli transformait une recherche multi-document en extraction structurée
+  implicite dès que le top-k ne faisait ressortir qu'un seul document (choix
+  de périmètre par convenance, non déterministe d'un corpus à l'autre).
+- Nouvel invariant : EXTRACT n'extrait que sur un `PerimetreDocumentaire`
+  résolu de façon **unique et fiable** ; sinon **refus déterministe** sans
+  appeler `search` ni `extract`. CLASSIFY / SUMMARIZE inchangés (mode
+  contextuel conservé — divergence volontaire propre à EXTRACT).
+- Ouverture puis fermeture ponctuelle du gel sur `nodes.py::noeud_extract`
+  (fonction + docstring uniquement). Tests génériques ajoutés dans
+  `tests/agent/test_nodes.py`, sans dépendance CQuAE.
+
+### P2.1 — façade applicative `AgentService` (`src/agent/service.py`)
+- Couche **mince** au-dessus de `executer_agent` : `AgentService.query(requete)
+  -> AgentResponse`. Validation légère (chaîne non vide → sinon
+  `status="error"`, `error.code="requete_invalide"`, sans appeler le cœur),
+  **un seul** appel au point d'entrée public P1, propagation intacte de
+  l'`AgentResponse`, **ne lève jamais** (erreur de construction de session →
+  `status="error"`).
+- Aucune logique de capacité, de routage, de RAG ni de normalisation
+  dupliquée. Aucune dépendance FastAPI / UI / connecteur / mémoire / logging.
+  `point_entree` et `options_session` injectables (tests hors ligne, sans
+  Ollama ni Qdrant).
+- Cœur P1 **non modifié** (`graph.py`, `nodes.py`, `state.py`, `session.py`,
+  `graph_state.py` intacts) ; `src/agent/__init__.py` exporte `AgentService`.
+  `tests/agent/test_service.py` (19 tests). Règle : API/UI appellent
+  `AgentService`, jamais LangGraph directement.
+
+### P2.2 — abstraction générique des sources documentaires (`src/sources/`, **gelé** 2026-08-31)
+- Découple **l'origine** des documents du **pipeline d'ingestion**. Contrat
+  minimal `DocumentSource.materialiser() -> ContextManager[Path]` : une source
+  fournit un **snapshot complet** dans un répertoire local, puis le socle gelé
+  prend le relais via `ingerer(dossier=…)` — qui accepte déjà un dossier
+  arbitraire. Le pipeline reçoit un `Path` (loaders gelés path-based, OCR,
+  détection de changement `RegistreFichiers` keyée par chemin).
+- **Invariant de sûreté** : le `Path` exposé est TOUJOURS un snapshot complet
+  et cohérent — jamais partiel. Une récupération incomplète lève `ErreurSource`
+  **avant** le `yield` → `IngestionService.sync` n'appelle pas le pipeline,
+  l'index reste intact. Une absence de document n'est lue comme suppression
+  **que parce que** le snapshot est garanti complet. Résout le risque
+  « erreur de récupération distante interprétée comme suppression ».
+- `SnapshotDocumentSource` (`src/sources/snapshot.py`) : base pour source à
+  récupération faillible. Sous-classe → `_recuperer(staging)` seulement.
+  `materialiser()` hérité : staging à l'écart → si `_recuperer` lève (ou
+  staging vide sans `autoriser_snapshot_vide`), staging détruit + **miroir
+  précédent intact** + `ErreurSource` ; sinon **remplacement atomique** du
+  miroir publié (renommages de répertoires, reprise via `<miroir>.precedent`),
+  puis `yield`. Miroir persistant (chemins stables pour le socle).
+- `LocalDocumentSource` : adaptateur MVP, satisfait l'invariant trivialement
+  (pas de récupération faillible). `materialiser()` rend le dossier de
+  l'utilisateur **tel quel** (aucune copie) →
+  `IngestionService().sync(LocalDocumentSource(d))` **strictement équivalent** à
+  `ingerer(dossier=d)`. `inventaire() -> list[str]` (hors contrat) réutilise
+  `decouvrir_fichiers` du socle. `ErreurSource` si le chemin n'est pas un
+  répertoire. Pas de modèle `DocumentDescriptor` : aucun usage concret (le
+  socle re-découvre depuis le répertoire).
+- `IngestionService.sync(source, *, reinitialiser, limite, inferer, nom_profil)`
+  : **un seul** appel au pipeline, options transmises telles quelles, rapport
+  renvoyé intact. Pipeline injectable (tests hors ligne, sans Ollama ni Qdrant).
+- **Aucune** modification de `src/rag/**` (`git diff rag-v1 -- src/rag` **vide**)
+  ni du cœur P1. Aucune découverte, hash, détection « inchangé » / suppression,
+  parsing, chunking, embedding ou écriture Qdrant réimplémentés : tout reste
+  dans `RegistreFichiers` / `ingerer` du socle. Aucune dépendance
+  SharePoint / S3 / API entreprise ; `EnterpriseDocumentSource` **non créé**.
+- `.gitignore` : l'ignore `docs/` (« documents d'avancement », sur-large, non
+  commité) est ramené à `docs/avancement/` — la doc de référence du dépôt sous
+  `docs/` redevient versionnable (`P1_CLOTURE.md` en était collatéralement
+  exclu).
+- `tests/sources/` (26 tests). Documentation :
+  [`docs/P2.2_SOURCES.md`](docs/P2.2_SOURCES.md).
+
+### P1.7 — validation finale (aucune nouvelle capacité)
+- Audit d'architecture, vérification des invariants, `pytest` **658/658**,
+  `evaluate_routing --deterministic_only` (SEARCH **24/24**, multidoc 14/14),
+  `multidoc_benchmark` **12/12**, E2E `executer_agent` (refus déterministes
+  confirmés live).
+- Livrable [`docs/P1_CLOTURE.md`](docs/P1_CLOTURE.md) : architecture finale P1,
+  statut des 6 capacités (supporté et testé / supporté avec limitation /
+  reporté P2), invariants, verdict **P1 READY TO FREEZE**.
+- `docs/architecture.md` mis à jour (COMPARE / SYNTHESIZE, détecteur
+  multi-document, `AgentResponse`, discipline de désignation du document).
+
+### Ajouté (P0–P1.2)
 - `README.md`, `docs/architecture.md`, `docs/DO_NOT_TOUCH.md`, `CHANGELOG.md`.
 - `evaluation/cquae_multicapacite.py` : harnais d'évaluation agent **4
   capacités** (SEARCH / SUMMARIZE / CLASSIFY / EXTRACT) sur CQuAE, avec

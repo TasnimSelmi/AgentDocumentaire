@@ -11,6 +11,13 @@ __pycache__/
 #data
 profiles/
 
+
+
+# Notes d'avancement locales uniquement — la doc de référence du dépôt
+# (architecture.md, DO_NOT_TOUCH.md, P1_CLOTURE.md, P2.2_SOURCES.md, …) reste versionnée.
+docs/avancement/
+
+
 # Évaluation locale : le dossier evaluation/ (scripts, datasets, rapports)
 # n'est PAS versionné. Motif ancré à la racine pour ne PAS capturer
 # accidentellement tests/evaluation/, qui contient des tests du dépôt.
