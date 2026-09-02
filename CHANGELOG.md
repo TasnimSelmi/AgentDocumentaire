@@ -15,8 +15,8 @@ tag [`rag-v1`](#rag-v1--2026-08-29)), puis **P1.1** (banc de routage),
 multi-document déterministe), **P1.5** (capacités COMPARE / SYNTHESIZE),
 **P1.6** (défaut **EX-03** — résolution documentaire contextuelle d'EXTRACT
 supprimée), **P1.7** (validation finale, cœur agentique **candidat au gel**),
-**P2.1** (façade applicative `AgentService`) et **P2.2** (abstraction générique
-des sources documentaires).
+**P2.1** (façade applicative `AgentService`), **P2.2** (abstraction générique
+des sources documentaires) et **P2.3** (API HTTP FastAPI mince).
 
 ### P1.3 — contrat de sortie public `AgentResponse` (`src/agent/response.py`)
 - Point d'entrée public `executer_agent(requete)` → `AgentResponse`
@@ -121,6 +121,51 @@ des sources documentaires).
   exclu).
 - `tests/sources/` (26 tests). Documentation :
   [`docs/P2.2_SOURCES.md`](docs/P2.2_SOURCES.md).
+
+### P2.3 — API HTTP FastAPI mince (`src/api/`)
+
+- Couche de **transport** au-dessus des façades gelées, aucune intelligence
+  documentaire : ni routage, ni capacité, ni ingestion, ni résolution
+  documentaire, ni logique Qdrant, ni re-normalisation d'`AgentResponse`.
+  Chaque route = validation Pydantic → **un** appel de service → adaptation
+  HTTP. `create_app(*, agent_service, ingestion_service, sources)` — tout
+  collaborateur injectable, construit paresseusement sinon (aucun accès
+  Ollama / Qdrant / FS à l'import ni à la création de l'app).
+- **`GET /health`** : liveness pur (aucune dépendance sondée) → `{"status":
+  "ok"}`.
+- **`POST /query`** `{ "query": str }` → délègue à `AgentService.query`,
+  renvoie **`AgentResponse.vers_dict()` tel quel** (aucun modèle Pydantic
+  miroir). Mapping : `success` / `refusal` → `200` (un refus métier n'est pas
+  une panne) ; `error` + `code="requete_invalide"` → `422` (l'autorité reste
+  `AgentService` : requête vide/blanche jamais transmise au cœur P1) ; tout
+  autre `error` → `500` avec bloc `error` **remplacé** par
+  `{"code": "internal_error", "message": …}`.
+- **`POST /ingestion`** `{ "source"?: str, "reinitialiser"?: bool,
+  "limite"?: int }` → résout `source` (nom **logique**) contre un registre
+  backend `nom -> fabrique DocumentSource` (MVP : `"local"` →
+  `LocalDocumentSource(Settings.documents_dir)`), puis délègue à
+  `IngestionService.sync`. **Le client ne fournit aucun chemin** :
+  `extra="forbid"` sur le corps → toute clé du type `path` / `dossier` /
+  `racine` = `422` ; `inferer` / `nom_profil` non exposés. `RapportIngestion`
+  renvoyé intact, y compris avec `fichiers_en_echec > 0` (→ `200`).
+  `ErreurSource` → `503` (dépendance temporairement indisponible), détail
+  générique.
+- **Sécurité / robustesse** : aucun traceback, exception brute, chemin local,
+  secret ou détail d'infrastructure dans une réponse HTTP (gestionnaires
+  `ErreurSource` → 503 et `Exception` → 500 à message fixe ; `/query` masque
+  l'erreur technique). **Pas d'authentification** (hors périmètre P2.3) :
+  `POST /ingestion` mute l'index — l'API MVP n'est pas destinée à une
+  exposition publique sans couche d'auth en amont. **Ingestion synchrone**
+  (requête bloquante le temps du pipeline) — limitation MVP assumée.
+- Dépendances ajoutées : `fastapi==0.115.14`, `uvicorn==0.34.3` (compatibles
+  `pydantic==2.10.4`, aucune dépendance transitive nouvelle hors `starlette` ;
+  `httpx` déjà présent pour `TestClient`). Lancement :
+  `uvicorn "src.api:create_app" --factory`.
+- **Aucune** modification de `src/rag/**`, du cœur P1, de
+  `src/agent/service.py` ni de `src/sources/**` (`git diff rag-v1 -- src/rag`
+  **vide**). `tests/api/` (40 tests, tous hors ligne, services injectés).
+  Documentation : [`docs/P2.3_API.md`](docs/P2.3_API.md). Gel de `src/api/`
+  **différé** à la validation finale P2.3.
 
 ### P1.7 — validation finale (aucune nouvelle capacité)
 - Audit d'architecture, vérification des invariants, `pytest` **658/658**,

@@ -48,3 +48,7 @@ pandas==2.2.3
 # --- Observabilité ---
 structlog==24.4.0
 tqdm==4.67.1
+
+# --- API HTTP (P2.3) ---
+fastapi==0.115.14
+uvicorn==0.34.3

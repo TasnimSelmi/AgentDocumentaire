@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from src.agent import multidoc_pipeline
-from tools.synthesize import ResultatSynthese, synthetiser_documents
+from src.tools.synthesize import ResultatSynthese, synthetiser_documents
 from tests.agent._multidoc_fakes import (
     SANS_EVIDENCE,
     LLMScripte,

@@ -20,6 +20,12 @@
 > aujourd'hui, API / GED demain) passe par cette couche et par
 > `IngestionService.sync()`, jamais par une modification de `src/rag/**`. Voir
 > [P2.2_SOURCES.md](P2.2_SOURCES.md) et [DO_NOT_TOUCH.md](DO_NOT_TOUCH.md) §4.
+>
+> **API HTTP (P2.3)** : `src/api/` (§7.8) — couche de transport mince
+> (`GET /health`, `POST /query` → `AgentService`, `POST /ingestion` →
+> `IngestionService`). `/query` renvoie le contrat public `AgentResponse` tel
+> quel ; le client ne fournit jamais de chemin filesystem. MVP sans
+> authentification. Voir [P2.3_API.md](P2.3_API.md).
 
 ---
 
@@ -484,6 +490,45 @@ API / UI / connecteurs documentaires
 > **Règle** : toute couche applicative (FastAPI, UI, connecteurs) appelle
 > `AgentService`, **jamais** LangGraph, `graph.py`, `nodes.py` ni une
 > structure interne du graphe directement.
+
+### 7.8 Couche API HTTP (`src/api/`, P2.3)
+
+Couche de **transport** exposant `AgentService` (§7.7) et `IngestionService`
+(§2.1) en HTTP/JSON. Aucune intelligence documentaire : ni routage, ni
+capacité, ni ingestion, ni résolution documentaire, ni logique Qdrant, ni
+re-normalisation d'`AgentResponse`. Chaque route :
+`validation Pydantic → un appel de service → adaptation HTTP`.
+
+```
+Client / UI  →  FastAPI (src/api/**)
+                  ├─ POST /query      → AgentService.query    → AgentResponse.vers_dict()  (tel quel)
+                  ├─ POST /ingestion  → IngestionService.sync → RapportIngestion           (asdict, intact)
+                  └─ GET  /health     → { "status": "ok" }    (liveness pur)
+```
+
+- **`create_app(*, agent_service, ingestion_service, sources)`** : collaborateurs
+  injectables (doublures en test), construits **paresseusement** sinon —
+  importer `src.api` ou appeler `create_app()` ne touche ni Ollama, ni Qdrant,
+  ni le système de fichiers.
+- **`/query`** renvoie **`AgentResponse.vers_dict()` tel quel** (aucun modèle
+  Pydantic miroir). Mapping : `success` / `refusal` → `200` (**un refus métier
+  n'est pas une panne**) ; `error` + `code="requete_invalide"` → `422`
+  (`AgentService` reste l'autorité unique — requête vide/blanche jamais
+  transmise au cœur P1) ; tout autre `error` → `500`, bloc `error` **remplacé**
+  par un message générique (aucun traceback / chemin / secret dans la réponse).
+- **`/ingestion`** résout `source` (nom **logique**) contre un registre backend
+  `nom -> fabrique DocumentSource` (MVP : `"local"` →
+  `LocalDocumentSource(Settings.documents_dir)`). **Le client ne fournit aucun
+  chemin** : `extra="forbid"` → une clé `path` / `dossier` / `racine` = `422`.
+  `inferer` / `nom_profil` non exposés. `ErreurSource` → `503`.
+  `RapportIngestion` renvoyé intact (y compris `fichiers_en_echec > 0` → `200`).
+- **Limitations MVP** : pas d'authentification (`POST /ingestion` mute l'index
+  — ne pas exposer publiquement en l'état) ; ingestion synchrone (requête
+  bloquante) ; `/health` = liveness seul.
+- **Aucune** modification de `src/rag/**`, du cœur P1, de `src/agent/service.py`
+  ni de `src/sources/**`. `tests/api/` (40 tests hors ligne, services
+  injectés). Lancement : `uvicorn "src.api:create_app" --factory`. Détails :
+  [P2.3_API.md](P2.3_API.md).
 
 ---
 
