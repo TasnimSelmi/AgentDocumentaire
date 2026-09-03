@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     # --- Journalisation ---
     log_level: str = "INFO"
 
+    # --- Observabilité (P2.4) ---
+    # Couche de traçage transverse (corrélation HTTP + événements agent /
+    # ingestion). Générique, sans effet sur le comportement métier.
+    observability_enabled: bool = True
+    observability_emit_start: bool = True
+
     @field_validator(
         "documents_dir",
         "logs_dir",

@@ -27,6 +27,7 @@ from src.api.dependencies import (
 )
 from src.api.errors import enregistrer_gestionnaires_erreurs
 from src.api.routes import router
+from src.observability import TraceSink, install_observability
 from src.sources import IngestionService
 
 _DESCRIPTION = (
@@ -42,8 +43,14 @@ def create_app(
     agent_service: AgentService | None = None,
     ingestion_service: IngestionService | None = None,
     sources: RegistreSources | None = None,
+    sink: TraceSink | None = None,
 ) -> FastAPI:
-    """Construit l'app. Tout collaborateur omis prend sa valeur par défaut."""
+    """Construit l'app. Tout collaborateur omis prend sa valeur par défaut.
+
+    `sink` (P2.4) : destination de traces d'observabilité injectée
+    explicitement (défaut : `LoggingTraceSink` — JSON structuré sur stdout).
+    Deux `create_app()` avec des sinks distincts n'interfèrent pas.
+    """
     app = FastAPI(
         title="AgentDocumentaire API",
         version="0.2.3",
@@ -58,6 +65,11 @@ def create_app(
 
     enregistrer_gestionnaires_erreurs(app)
     app.include_router(router)
+
+    # P2.4 : couche d'observabilité transverse. Installe le middleware de
+    # corrélation ASGI et enveloppe les services dans leurs wrappers observants.
+    # `src/api/routes.py` reste sans aucune logique d'observabilité.
+    install_observability(app, sink=sink)
     return app
 
 

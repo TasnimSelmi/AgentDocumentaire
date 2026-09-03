@@ -189,6 +189,49 @@ fichiers ci-dessus. Voir [P2.2_SOURCES.md](P2.2_SOURCES.md).
 
 ---
 
+## 4bis. Invariants — observabilité P2.4 (`src/observability/`, gel différé)
+
+> Couche de traçage transverse (P2.4). Gel formel **différé** à la validation
+> finale de P2, comme `src/api/`. En attendant, ces invariants sont
+> **normatifs**. Voir [P2.4_OBSERVABILITY.md](P2.4_OBSERVABILITY.md).
+
+- **Ne modifie aucune couche gelée.** `src/observability/**` **appelle**
+  `AgentService` / `IngestionService` (les enveloppe) ; il ne touche jamais
+  `src/rag/**`, `src/agent/**`, `src/tools/**`, `src/sources/**`.
+  `git diff rag-v1 -- src/rag` reste **vide**.
+- **`AgentResponse` inchangé.** L'observabilité en **dérive** des attributs
+  (`capability`, `documents`, `citations`, `source_count`, `refusal_code`,
+  `error.*`) ; elle n'ajoute, ne retire ni ne renomme aucun champ, et ne
+  modifie jamais l'objet renvoyé.
+- **Aucune trace interne exposée.** `EtatAgent.trace` / `EtatGraphe` /
+  `SessionAgent` / prompts / chain-of-thought / réponses LLM brutes / requêtes
+  reformulées / contenu documentaire complet ne franchissent **jamais** un
+  `TraceSink`. La sérialisation passe par une **allow-list** stricte
+  (`src/observability/redaction.py`), jamais par `asdict()`.
+- **`src/api/routes.py` sans logique d'observabilité.** Le corps de `/query`
+  est **strictement identique** à P2.3. OpenAPI expose **uniquement**
+  `/health`, `/query`, `/ingestion`.
+- **`src/api/errors.py` reste l'unique autorité HTTP.** Un **seul**
+  `@app.exception_handler(Exception)` ; il émet `http_unhandled_error` puis
+  renvoie **exactement** le même `500` générique P2.3. `ErreurSource` → même
+  `503`. Jamais de stack ni de message technique réel au client.
+- **Pas de global mutable.** Aucun `get_sink()` / `set_sink()`, aucun sink de
+  module. Le `TraceSink` est **injecté** (`install_observability(app, *,
+  sink=…)` / `create_app(*, sink=…)`). `structlog` reste confiné à
+  `LoggingTraceSink`.
+- **Enveloppe d'événement versionnée et fermée** (`schema_version = "1.0"`).
+  Changer la forme de l'enveloppe ou d'un bloc `attributes` = bump de
+  `schema_version` + entrée [../CHANGELOG.md](../CHANGELOG.md).
+- **Configuration** via `Settings` uniquement (`observability_enabled`,
+  `observability_emit_start`) — **aucun** `os.getenv` dans
+  `src/observability/`, aucun second système de configuration.
+
+Modification légitime : nouveau `TraceSink` (OpenTelemetry, ELK, Loki,
+Splunk…) = **nouveau module** implémentant le `Protocol`, injecté via
+`create_app(sink=…)` — jamais une modification des sept fichiers du paquet.
+
+---
+
 ## 5. Gelé — configuration de référence
 
 | Élément | Valeur gelée |

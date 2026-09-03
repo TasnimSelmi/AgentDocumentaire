@@ -17,7 +17,21 @@ from fastapi.testclient import TestClient
 
 from src.agent.response import STATUT_SUCCES, AgentResponse
 from src.api import create_app
+from src.observability import NullTraceSink, ObservabilityEvent
 from src.rag.ingestion import RapportIngestion
+
+
+class CapturingSink:
+    """`TraceSink` de test : conserve les événements émis, en mémoire."""
+
+    def __init__(self) -> None:
+        self.events: list[ObservabilityEvent] = []
+
+    def emit(self, event: ObservabilityEvent) -> None:
+        self.events.append(event)
+
+    def par_nom(self, nom: str) -> list[ObservabilityEvent]:
+        return [e for e in self.events if e.event == nom]
 
 
 class EspionAgentService:
@@ -129,16 +143,26 @@ def sources(source_marqueur: SourceMarqueur) -> dict[str, Any]:
 
 
 @pytest.fixture
+def capturing_sink() -> CapturingSink:
+    return CapturingSink()
+
+
+@pytest.fixture
 def build_client(agent_service, ingestion_service, sources):
     """Fabrique de `TestClient`. Sans argument : utilise les espions des
     fixtures. Chaque argument nommé (`agent_service=`, `ingestion_service=`,
-    `sources=`) remplace la doublure correspondante."""
+    `sources=`, `sink=`) remplace la doublure correspondante.
+
+    Le sink par défaut est `NullTraceSink` : les tests P2.3 n'observent pas de
+    trace et rien n'est écrit sur stdout. Passer `sink=CapturingSink()` pour
+    inspecter les événements."""
 
     def _build(**overrides: Any) -> TestClient:
         app = create_app(
             agent_service=overrides.get("agent_service", agent_service),
             ingestion_service=overrides.get("ingestion_service", ingestion_service),
             sources=overrides.get("sources", sources),
+            sink=overrides.get("sink", NullTraceSink()),
         )
         return TestClient(app, raise_server_exceptions=False)
 

@@ -16,7 +16,8 @@ multi-document déterministe), **P1.5** (capacités COMPARE / SYNTHESIZE),
 **P1.6** (défaut **EX-03** — résolution documentaire contextuelle d'EXTRACT
 supprimée), **P1.7** (validation finale, cœur agentique **candidat au gel**),
 **P2.1** (façade applicative `AgentService`), **P2.2** (abstraction générique
-des sources documentaires) et **P2.3** (API HTTP FastAPI mince).
+des sources documentaires), **P2.3** (API HTTP FastAPI mince) et **P2.4**
+(observabilité transverse).
 
 ### P1.3 — contrat de sortie public `AgentResponse` (`src/agent/response.py`)
 - Point d'entrée public `executer_agent(requete)` → `AgentResponse`
@@ -166,6 +167,80 @@ des sources documentaires) et **P2.3** (API HTTP FastAPI mince).
   **vide**). `tests/api/` (40 tests, tous hors ligne, services injectés).
   Documentation : [`docs/P2.3_API.md`](docs/P2.3_API.md). Gel de `src/api/`
   **différé** à la validation finale P2.3.
+
+### P2.4 — observabilité transverse (`src/observability/`)
+
+- Couche de **traçage** transverse au-dessus des façades et de l'API. Trace
+  les exécutions agent et les ingestions — durée totale, statut, capacité,
+  documents / citations, compteurs d'ingestion, erreurs techniques
+  **sécurisées**, identifiant de corrélation exploitable par le support —
+  **sans modifier aucun comportement métier**. `AgentResponse` **strictement
+  inchangé** ; aucune trace interne du graphe LangGraph exposée. `src/rag/**`,
+  `src/agent/**`, `src/tools/**`, `src/sources/**` **non touchés**
+  (`git diff rag-v1 -- src/rag` **vide**).
+- **`CorrelationMiddleware`** (ASGI pur, **pas** `BaseHTTPMiddleware`) :
+  accepte `X-Request-Id` entrant seulement si `^[A-Za-z0-9._-]{1,128}$`, sinon
+  `uuid4().hex` ; génère **toujours** `X-Execution-Id` côté serveur ; lie deux
+  `ContextVar`, recopie dans `scope["state"]`, ajoute les deux en-têtes à la
+  réponse, `reset` dans `finally`. Aucun événement métier, aucune exception
+  avalée. Isolation vérifiée sous concurrence asyncio + propagation vers le
+  threadpool synchrone de Starlette.
+- **`ObservabilityEvent`** : enveloppe immuable **versionnée**
+  (`schema_version = "1.0"`) et fermée — `event`, `request_id`, `operation_id`,
+  `started_at` / `finished_at`, `duration_ms` (`time.perf_counter`), `outcome`
+  ∈ {`success`, `refusal`, `partial`, `error`}, `attributes`. `attributes`
+  n'est **jamais** un `dict[str, Any]` : dataclasses typées
+  `AgentExecutionAttributes` (dérivée du **seul** contrat public
+  `AgentResponse`), `IngestionAttributes` (miroir 1:1 des compteurs de
+  `RapportIngestion`), `HttpErrorAttributes`. Noms d'événements stables :
+  `agent_execution_started|completed|failed`,
+  `ingestion_started|completed|failed`, `http_unhandled_error`.
+- **`InstrumentedAgentService` / `InstrumentedIngestionService`** : mêmes
+  signatures publiques ; `inner` appelé **exactement une fois** ; objet métier
+  renvoyé **tel quel** ; `*_started` (si `observability_emit_start`) puis
+  `*_completed` / `*_failed` ; wrapper agent protégé (`try/except` → émission
+  sécurisée puis `raise`) ; `ErreurSource` → `ingestion_failed` /
+  `source_unavailable`, autre exception → `unexpected`, puis re-raise ;
+  `fichiers_en_echec > 0` → `outcome = partial`. Appel hors HTTP : contexte de
+  corrélation complet créé puis réinitialisé.
+- **`TraceSink`** (Protocol `emit(event)`), `NullTraceSink`, `LoggingTraceSink`
+  (**seul** dépendant de `structlog` : logger `structlog` **local** via
+  `wrap_logger`, JSON structuré sur stdout, configuration idempotente, **root
+  logger `logging` préservé**, `emit` défaillant absorbé). **Aucun**
+  `get_sink()` / `set_sink()`, aucun sink global mutable : sink **injecté**
+  explicitement. Deux `create_app()` à sinks distincts n'interfèrent pas.
+- **Redaction centralisée** : **allow-list** de sérialisation d'abord (aucun
+  `asdict`) ; scrub de motifs (`Authorization` / `Cookie`, `Bearer`, JWT,
+  `clé=valeur` sensible, credentials d'URL, chemins absolus POSIX/Windows,
+  `File "<chemin>"` → basename) appliqué **uniquement** à `error_message` /
+  `error_stack` ; `str(exc)` jamais journalisé brut. **Aucune** règle « chaîne
+  de 32+ caractères = secret » (préserve `uuid4().hex` et les ids de
+  corrélation). Un nom de document = `BACKEND_AUDIT`, jamais renvoyé au client.
+- **Erreurs HTTP** : `src/api/errors.py` reste l'**unique** autorité. Le seul
+  `@app.exception_handler(Exception)` récupère les ids sur `request.state`,
+  émet `http_unhandled_error`, puis renvoie **exactement** le même `500`
+  générique P2.3 (`{"detail": "Erreur interne."}`). `ErreurSource` → même
+  `503`. Les en-têtes de corrélation sont réappliqués sur ces réponses
+  d'erreur (générées hors du middleware).
+- **`install_observability(app, *, sink=None)`** + `create_app(*, …, sink=None)`
+  : installe le middleware, enveloppe `app.state.agent_service` /
+  `.ingestion_service`, pose `ObservabilityRuntime` sur
+  `app.state.observability`. `src/api/routes.py` **inchangé** (aucune logique
+  d'observabilité) ; corps de `/query` **strictement identique** à P2.3 ;
+  OpenAPI expose toujours **uniquement** `/health`, `/query`, `/ingestion`.
+- **Configuration** : `Settings.observability_enabled` (défaut `True` ;
+  `False` = no-op métier complet) et `observability_emit_start` (défaut
+  `True`) ajoutés à `src/config.py`. **Aucun** `os.getenv` dans
+  `src/observability`, aucun second système de configuration ; `log_level`
+  réutilisé.
+- **Hors périmètre (non implémenté)** : JSONL, DB de traces, Kafka,
+  OpenTelemetry, Prometheus, ELK / Loki / Splunk, base d'audit. Extensible
+  plus tard via un autre `TraceSink`.
+- `tests/observability/**` (corrélation, événements, redaction, sinks,
+  instrumentation agent / ingestion, middleware ASGI, intégration) +
+  `tests/api/test_observability.py` + `tests/api/` complété. Suite complète
+  **verte**. Documentation :
+  [`docs/P2.4_OBSERVABILITY.md`](docs/P2.4_OBSERVABILITY.md).
 
 ### P1.7 — validation finale (aucune nouvelle capacité)
 - Audit d'architecture, vérification des invariants, `pytest` **658/658**,

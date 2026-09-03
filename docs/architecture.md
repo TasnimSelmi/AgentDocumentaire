@@ -526,9 +526,65 @@ Client / UI  →  FastAPI (src/api/**)
   — ne pas exposer publiquement en l'état) ; ingestion synchrone (requête
   bloquante) ; `/health` = liveness seul.
 - **Aucune** modification de `src/rag/**`, du cœur P1, de `src/agent/service.py`
-  ni de `src/sources/**`. `tests/api/` (40 tests hors ligne, services
-  injectés). Lancement : `uvicorn "src.api:create_app" --factory`. Détails :
+  ni de `src/sources/**`. `tests/api/` (hors ligne, services injectés).
+  Lancement : `uvicorn "src.api:create_app" --factory`. Détails :
   [P2.3_API.md](P2.3_API.md).
+
+### 7.9 Observabilité transverse (`src/observability/`, P2.4)
+
+Couche de **traçage** transverse. Trace les exécutions agent et les ingestions
+— durée, statut, capacité, documents / citations, erreurs techniques
+**sécurisées**, identifiant de corrélation — **sans modifier aucun
+comportement métier** et **sans toucher aux couches gelées**. `AgentResponse`
+strictement inchangé ; aucune trace interne du graphe LangGraph exposée.
+
+```
+HTTP → CorrelationMiddleware (ASGI pur) → routes FastAPI (inchangées)
+     → InstrumentedAgentService / InstrumentedIngestionService
+     → AgentService / IngestionService (P2.1 / P2.2) → cœur gelé
+
+  Instrumented*Service ─▶ ObservabilityEvent ─▶ TraceSink
+                                                 ├─ LoggingTraceSink → JSON stdout
+                                                 └─ NullTraceSink    → no-op
+```
+
+- **`CorrelationMiddleware`** : valide/génère `X-Request-Id`
+  (`^[A-Za-z0-9._-]{1,128}$`), génère **toujours** `X-Execution-Id` serveur,
+  lie deux `ContextVar`, recopie dans `scope["state"]`, ajoute les deux
+  en-têtes à la réponse, `reset` dans `finally`. Aucun événement métier,
+  aucune exception avalée, aucune logique Agent/RAG. Isolation vérifiée sous
+  concurrence asyncio et propagation vers le threadpool synchrone.
+- **`ObservabilityEvent`** : enveloppe immuable **versionnée** (`schema_version
+  = "1.0"`) et fermée — `event`, `request_id`, `operation_id`, `started_at` /
+  `finished_at`, `duration_ms` (`time.perf_counter`), `outcome` ∈ {`success`,
+  `refusal`, `partial`, `error`}, `attributes`. `attributes` n'est **jamais**
+  un `dict[str, Any]` : dataclasses typées `AgentExecutionAttributes` (dérivée
+  du seul contrat `AgentResponse`), `IngestionAttributes` (miroir des
+  compteurs `RapportIngestion`), `HttpErrorAttributes`.
+- **`Instrumented*Service`** : `inner` appelé **exactement une fois** ; objet
+  métier (`AgentResponse` / `RapportIngestion`) renvoyé **tel quel** ;
+  `*_started` (si `observability_emit_start`) puis `*_completed` / `*_failed` ;
+  `ErreurSource` → `ingestion_failed` / `source_unavailable` puis re-raise ;
+  `fichiers_en_echec > 0` → `outcome = partial`. Hors HTTP, un contexte de
+  corrélation complet est créé puis réinitialisé.
+- **Redaction centralisée** : **allow-list** de sérialisation d'abord (aucun
+  `asdict`), puis scrub de motifs (`Bearer`, JWT, `clé=valeur` sensible,
+  credentials d'URL, chemins absolus) sur `error_message` / `error_stack`
+  uniquement. `str(exc)` jamais journalisé brut. **Aucune** règle « chaîne
+  longue = secret » (préserve `uuid4().hex`). Un nom de document n'est pas
+  public (classe `BACKEND_AUDIT`).
+- **Erreurs HTTP** : `src/api/errors.py` reste l'**unique** autorité. Le seul
+  `@app.exception_handler(Exception)` émet `http_unhandled_error` puis renvoie
+  **exactement** le même `500` générique P2.3 ; `ErreurSource` → même `503`.
+- **`install_observability(app, *, sink=None)`** : installe le middleware,
+  enveloppe `app.state.agent_service` / `.ingestion_service`, pose un
+  `ObservabilityRuntime` sur `app.state.observability`. **Aucun global
+  mutable**, aucun `get_sink()` / `set_sink()` : sink injecté explicitement.
+  Piloté par `Settings.observability_enabled` / `observability_emit_start`
+  (aucun `os.getenv` dans `src/observability`). `structlog` confiné à
+  `LoggingTraceSink`. Extensible vers OpenTelemetry / ELK / Loki / Splunk via
+  un autre `TraceSink` — **non implémenté**. Détails :
+  [P2.4_OBSERVABILITY.md](P2.4_OBSERVABILITY.md).
 
 ---
 
@@ -578,5 +634,7 @@ retrieval ni le routage.
 | Comparer / synthétiser 2..4 documents nommés ? | `agent/multidoc_pipeline.py` + `tools/compare.py` / `tools/synthesize.py` |
 | Exposer une capacité comme outil ? | `tools/*.py` |
 | Contrat de sortie unique pour un consommateur externe ? | `agent/response.py` (`AgentResponse`, déterministe) |
+| Exposer les façades en HTTP/JSON ? | `api/**` (transport, validation, mapping HTTP) |
+| Tracer requêtes agent / ingestions (durée, statut, corrélation) ? | `observability/**` (`CorrelationMiddleware`, `Instrumented*Service`, `TraceSink`) |
 | Quel modèle LLM, comment l'appeler ? | `llm/factory.py` + `llm/common.py` |
 | Mesurer la qualité ? | `evaluation/` (jamais `src/`) |
