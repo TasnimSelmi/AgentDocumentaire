@@ -411,10 +411,10 @@ def test_executer_agent_compare_bout_en_bout(monkeypatch) -> None:
     )
 
     class _LLM:
-        def invoke(self, messages):
+        def invoke(self, messages, think: bool | None = None):
             if "deux intentions possibles" in messages[0].content:
                 return AIMessage(content='{"intention": "SEARCH"}')
-            return LLMScripte().invoke(messages)
+            return LLMScripte().invoke(messages, think=think)
 
     ar = executer_agent(
         "Compare rapport_alpha.pdf et rapport_beta.pdf.",

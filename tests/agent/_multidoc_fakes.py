@@ -1,9 +1,20 @@
 """
-Doublures partagées pour les tests des branches COMPARE / SYNTHESIZE (P1.5).
+Doublures partagées pour les tests des branches COMPARE / SYNTHESIZE
+(P1.5 -> P1.8 PLAN borné + MAP structuré).
 
 Aucun Ollama, aucun Qdrant : `catalogue` / `charger_document` de
 `src.agent.multidoc_pipeline` sont remplacés, et le LLM est une doublure
 scriptée qui ne cite QUE ce qu'elle voit réellement dans le prompt.
+
+Depuis P1.8, le pipeline fait 3 sortes d'appels LLM distincts :
+  - PLAN (`EST_PLAN`)   : un appel par requête, JSON `{objectif, axes,
+    informations_attendues}` — ne voit aucun contenu de document ;
+  - MAP  (`EST_MAP_LOT`) : un appel par lot, JSON structuré `{pertinent,
+    elements, warnings}` ;
+  - REDUCE (inchangé depuis P1.5) : un appel inter-document, JSON métier
+    (COMPARAISON / SYNTHÈSE TRANSVERSALE).
+Il n'y a plus d'appel LLM d'agrégation intra-document (fusion déterministe,
+pure Python, cf. `multidoc_pipeline._fusionner_elements`).
 """
 
 from __future__ import annotations
@@ -22,12 +33,31 @@ _MOTIF_CIT = re.compile(r"\[(D\d+S\d+)\]")
 SANS_EVIDENCE = "AUCUNE INFORMATION PERTINENTE"
 
 
+def EST_PLAN(systeme: str) -> bool:
+    return "prépares le PLAN" in systeme
+
+
 def EST_MAP_LOT(systeme: str) -> bool:
     return "analyses un extrait d'UN seul document" in systeme
 
 
-def EST_AGREGATION_INTRA_DOC(systeme: str) -> bool:
-    return "portant TOUTES sur le MÊME document" in systeme
+def _axes_depuis_prompt_map(utilisateur: str) -> list[str]:
+    """Relit, dans le prompt utilisateur MAP, les axes tels qu'envoyés par le
+    pipeline (section « AXES DE LA DEMANDE ») — la doublure ne les invente
+    pas, elle les recopie, exactement comme un LLM correctement instruit le
+    ferait."""
+    axes: list[str] = []
+    dans_bloc = False
+    for ligne in utilisateur.splitlines():
+        if ligne.startswith("AXES DE LA DEMANDE"):
+            dans_bloc = True
+            continue
+        if dans_bloc:
+            if ligne.startswith("- "):
+                axes.append(ligne[2:].strip())
+            else:
+                break
+    return axes
 
 
 def passage(doc_id: str, index: int, texte: str, *, page: int | None = None) -> Passage:
@@ -90,32 +120,55 @@ def cabler_corpus(
 
 
 class LLMScripte:
-    """LLM déterministe : MAP renvoie les faits pertinents cités du document ;
-    REDUCE renvoie un JSON dont chaque élément porte des citations réellement
-    vues dans le prompt. Ne cite jamais hors de ce qui lui est montré, sauf
-    si `citation_hors_scope` est fournie (pour tester le filtrage)."""
+    """LLM déterministe : PLAN renvoie un plan borné générique ; MAP renvoie
+    les faits pertinents cités du document, structurés en JSON ; REDUCE
+    renvoie un JSON dont chaque élément porte des citations réellement vues
+    dans le prompt. Ne cite jamais hors de ce qui lui est montré, sauf si
+    `citation_hors_scope` est fournie (pour tester le filtrage)."""
 
     def __init__(self, *, citation_hors_scope: str | None = None) -> None:
         self.appels: list[tuple[str, str]] = []
+        self.appels_think: list[bool | None] = []
         self.citation_hors_scope = citation_hors_scope
 
-    def invoke(self, messages: Any) -> AIMessage:
+    def invoke(self, messages: Any, think: bool | None = None) -> AIMessage:
         systeme, utilisateur = messages[0].content, messages[1].content
         self.appels.append((systeme, utilisateur))
+        self.appels_think.append(think)
+
+        if EST_PLAN(systeme):
+            objet = {
+                "objectif": "Analyser les documents fournis selon les axes ci-dessous.",
+                "axes": ["éléments pertinents"],
+                "informations_attendues": [],
+            }
+            return AIMessage(content=json.dumps(objet, ensure_ascii=False))
+
         cites = list(dict.fromkeys(_MOTIF_CIT.findall(utilisateur)))
 
         if EST_MAP_LOT(systeme):
             # MAP d'un lot : si un passage du lot porte le marqueur, pas d'évidence.
             if SANS_EVIDENCE in utilisateur:
-                return AIMessage(content=SANS_EVIDENCE)
-            corps = " ".join(f"[{c}]" for c in cites[:3]) or "(rien)"
-            return AIMessage(content=f"Élément pertinent du document. {corps}")
-
-        if EST_AGREGATION_INTRA_DOC(systeme):
-            # Consolidation des maps de lots d'un même document : conserve les
-            # citations vues.
+                objet = {"pertinent": False, "elements": [], "warnings": []}
+                return AIMessage(content=json.dumps(objet, ensure_ascii=False))
+            axes = _axes_depuis_prompt_map(utilisateur) or ["éléments pertinents"]
             corps = " ".join(f"[{c}]" for c in cites) or "(rien)"
-            return AIMessage(content=f"Liste consolidée du document. {corps}")
+            objet = {
+                "pertinent": True,
+                "elements": [
+                    {
+                        "axe": axes[0],
+                        # Les citations sont recopiées dans le texte : rend
+                        # chaque élément distinct d'un lot à l'autre (la fusion
+                        # déterministe dédoublonne sur (axe, contenu), jamais
+                        # sur les seules citations).
+                        "contenu": f"Élément pertinent du document. {corps}",
+                        "citations": cites,
+                    }
+                ],
+                "warnings": [],
+            }
+            return AIMessage(content=json.dumps(objet, ensure_ascii=False))
 
         # REDUCE inter-document (COMPARE ou SYNTHESE)
         par_doc: dict[str, list[str]] = {}
@@ -159,7 +212,7 @@ class LLMScripte:
 
 
 class LLMExplose:
-    def invoke(self, messages: Any) -> AIMessage:  # pragma: no cover
+    def invoke(self, messages: Any, think: bool | None = None) -> AIMessage:  # pragma: no cover
         raise RuntimeError("LLM injoignable")
 
 
@@ -168,12 +221,12 @@ def make_llm_map_echoue(sur_libelle: str) -> Callable:
         def __init__(self) -> None:
             self.appels: list[tuple[str, str]] = []
 
-        def invoke(self, messages: Any) -> AIMessage:
+        def invoke(self, messages: Any, think: bool | None = None) -> AIMessage:
             systeme, utilisateur = messages[0].content, messages[1].content
             self.appels.append((systeme, utilisateur))
             if EST_MAP_LOT(systeme) and sur_libelle in utilisateur:
                 raise RuntimeError("MAP KO")
             base = LLMScripte()
-            return base.invoke(messages)
+            return base.invoke(messages, think=think)
 
     return _LLM()

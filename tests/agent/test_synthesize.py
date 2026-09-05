@@ -147,15 +147,41 @@ def test_au_dela_limite_refus(monkeypatch) -> None:
     assert r.donnees.get("motif") == "au_dela_limite"
 
 
-def test_un_document_sans_evidence_refus(monkeypatch) -> None:
+def test_un_document_sans_evidence_partiel(monkeypatch) -> None:
+    """Audit long-documents, section D : 1 document exploitable sur 2 ->
+    réponse PARTIELLE sourcée, jamais un refus global (ancien comportement)."""
     _corpus_2(monkeypatch, b_sans_evidence=True)
     r = synthetiser_documents(
         "Synthèse de note_a.pdf et note_b.pdf.",
         ["note_a.pdf", "note_b.pdf"],
         llm=LLMScripte(),
     )
+    assert r.succes
+    assert r.donnees.get("statut") == "partiel"
+    assert "note_b.pdf" in r.donnees["synthese"]["documents_sans_evidence"]
+    assert r.sources
+    assert {s.doc_id for s in r.sources} == {"A"}
+
+
+def test_aucun_document_exploitable_refus_dur(monkeypatch) -> None:
+    """Zéro preuve exploitable : le refus dur reste (seul cas restant)."""
+    cabler_corpus(
+        monkeypatch,
+        multidoc_pipeline,
+        fiches={"note_a.pdf": "A", "note_b.pdf": "B"},
+        passages_par_doc={
+            "A": [passage("A", 1, SANS_EVIDENCE, page=1)],
+            "B": [passage("B", 1, SANS_EVIDENCE, page=1)],
+        },
+    )
+    r = synthetiser_documents(
+        "Synthèse de note_a.pdf et note_b.pdf.",
+        ["note_a.pdf", "note_b.pdf"],
+        llm=LLMScripte(),
+    )
     assert not r.succes
-    assert "note_b.pdf" in " ".join(r.donnees.get("documents_sans_evidence", []))
+    assert "aucun document ne fournit" in r.message.lower()
+    assert not r.sources
 
 
 def test_synthese_documents_volumineux_couverts_en_entier(monkeypatch) -> None:

@@ -6,8 +6,8 @@ sans Ollama ni Qdrant :
 
   1. Une information placée UNIQUEMENT dans le DERNIER lot d'un document long
      (>= 3 lots) survit :
-        document complet -> dernier lot -> MAP -> agrégation intra-document
-        -> REDUCE -> réponse finale COMPARE / SYNTHESIZE
+        document complet -> dernier lot -> MAP structuré -> fusion
+        déterministe -> REDUCE -> réponse finale COMPARE / SYNTHESIZE
      avec la bonne provenance (citation + page).
 
   2. Un document produisant plus de NB_LOTS_MAX lots est REFUSÉ explicitement
@@ -26,8 +26,8 @@ from src.agent import multidoc_pipeline as mp
 from src.tools.compare import comparer
 from src.tools.synthesize import synthetiser_documents
 from tests.agent._multidoc_fakes import (
-    EST_AGREGATION_INTRA_DOC,
     EST_MAP_LOT,
+    EST_PLAN,
     cabler_corpus,
     passage,
 )
@@ -37,35 +37,72 @@ _MARQUEUR = "LA VALEUR SECRETE EST 4242"
 _PAGE_MARQUEUR = 99
 
 
+def _task_spec(operation: str = "compare") -> mp.TaskSpec:
+    return mp._plan_repli(operation)
+
+
+def _axes_depuis_prompt_map(utilisateur: str) -> list[str]:
+    axes: list[str] = []
+    dans_bloc = False
+    for ligne in utilisateur.splitlines():
+        if ligne.startswith("AXES DE LA DEMANDE"):
+            dans_bloc = True
+            continue
+        if dans_bloc:
+            if ligne.startswith("- "):
+                axes.append(ligne[2:].strip())
+            else:
+                break
+    return axes
+
+
 class _LLMTracant:
     """
     LLM déterministe qui PROPAGE toute citation vue :
-      - MAP d'un lot   -> renvoie chaque [D_S_] du lot + recopie le marqueur
-                          s'il est présent dans le lot ;
-      - agrégation     -> renvoie toutes les citations vues + le marqueur ;
+      - PLAN           -> plan générique borné (axes fixes, sans contenu de
+                          document) ;
+      - MAP d'un lot   -> JSON structuré listant chaque [D_S_] du lot,
+                          contenu recopiant le marqueur s'il est présent ;
       - REDUCE         -> JSON dont chaque champ liste TOUTES les citations
                           vues, marqueur inclus.
-    Ne cite jamais rien qu'il n'ait pas vu.
+    Ne cite jamais rien qu'il n'ait pas vu. Aucune agrégation intra-document
+    LLM (fusion déterministe côté pipeline depuis P1.8).
     """
 
     def __init__(self) -> None:
         self.appels: list[tuple[str, str]] = []
 
-    def invoke(self, messages) -> AIMessage:
+    def invoke(self, messages, think: bool | None = None) -> AIMessage:
         systeme, utilisateur = messages[0].content, messages[1].content
         self.appels.append((systeme, utilisateur))
+
+        if EST_PLAN(systeme):
+            objet = {
+                "objectif": "Analyser les documents fournis selon les axes ci-dessous.",
+                "axes": ["éléments pertinents"],
+                "informations_attendues": [],
+            }
+            return AIMessage(content=json.dumps(objet, ensure_ascii=False))
+
         cites = list(dict.fromkeys(_CIT.findall(utilisateur)))
         porte_marqueur = _MARQUEUR in utilisateur
 
         if EST_MAP_LOT(systeme):
+            axes = _axes_depuis_prompt_map(utilisateur) or ["éléments pertinents"]
             corps = " ".join(f"[{c}]" for c in cites)
             suffixe = f" — {_MARQUEUR}" if porte_marqueur else ""
-            return AIMessage(content=f"Éléments du lot : {corps}{suffixe}")
-
-        if EST_AGREGATION_INTRA_DOC(systeme):
-            corps = " ".join(f"[{c}]" for c in cites)
-            suffixe = f" {_MARQUEUR}" if porte_marqueur else ""
-            return AIMessage(content=f"Liste consolidée : {corps}{suffixe}")
+            objet = {
+                "pertinent": True,
+                "elements": [
+                    {
+                        "axe": axes[0],
+                        "contenu": f"Éléments du lot : {corps}{suffixe}",
+                        "citations": cites,
+                    }
+                ],
+                "warnings": [],
+            }
+            return AIMessage(content=json.dumps(objet, ensure_ascii=False))
 
         # REDUCE (COMPARAISON ou SYNTHÈSE TRANSVERSALE)
         toutes = " ".join(f"[{c}]" for c in cites)
@@ -151,14 +188,16 @@ def test_information_du_dernier_lot_survit_jusqua_la_reponse(monkeypatch, operat
     assert "4242" in texte_final
 
     # (e) chaîne complète tracée : le marqueur est passé par un MAP de lot,
-    #     par l'agrégation intra-document, puis par le REDUCE.
+    #     PUIS par le REDUCE. Il n'y a plus d'agrégation intra-document LLM
+    #     depuis P1.8 (fusion déterministe, pure Python, cf.
+    #     `multidoc_pipeline._fusionner_elements` — 0 appel LLM, donc rien à
+    #     tracer ici pour cette étape).
     vu_map = any(EST_MAP_LOT(s) and _MARQUEUR in u for s, u in llm.appels)
-    vu_agg = any(EST_AGREGATION_INTRA_DOC(s) and _MARQUEUR in u for s, u in llm.appels)
     vu_reduce = any(
         ("COMPARAISON" in s or "SYNTHÈSE TRANSVERSALE" in s) and _MARQUEUR in u
         for s, u in llm.appels
     )
-    assert vu_map and vu_agg and vu_reduce
+    assert vu_map and vu_reduce
 
     # (f) aucune fuite : toutes les sources appartiennent aux 2 documents visés
     assert {s.doc_id for s in r.sources} <= {"LONG", "AUT"}
@@ -171,6 +210,11 @@ def test_information_du_dernier_lot_survit_jusqua_la_reponse(monkeypatch, operat
 
 @pytest.mark.parametrize("operation", ["compare", "synthesize"])
 def test_au_dela_de_nb_lots_max_refus_explicite_pas_de_repli(monkeypatch, operation):
+    """NB_LOTS_MAX reste intact : le document trop volumineux est TOUJOURS
+    rejeté explicitement (jamais tronqué, jamais traité silencieusement).
+    Depuis l'audit long-documents (section D), ce rejet ne bloque plus la
+    demande entière quand l'AUTRE document reste exploitable : réponse
+    PARTIELLE sourcée sur ce qui est prouvé, plutôt qu'un refus global."""
     monkeypatch.setattr(mp, "LIMITE_CARACTERES_LOT", 120)
     monkeypatch.setattr(mp, "NB_LOTS_MAX", 3)
 
@@ -185,14 +229,18 @@ def test_au_dela_de_nb_lots_max_refus_explicite_pas_de_repli(monkeypatch, operat
 
     fn = comparer if operation == "compare" else synthetiser_documents
     r = fn("?", ["trop_long.pdf", "autre.pdf"], llm=_LLMTracant())
+    cle = "comparaison" if operation == "compare" else "synthese"
 
-    assert not r.succes  # refus
-    assert r.outil == operation  # pas de bascule vers un autre outil
-    # message honnête : moins de 2 documents exploitables
-    assert "moins de deux documents" in r.message.lower()
-    assert "trop_long.pdf" in " ".join(r.donnees.get("documents_en_echec", []))
-    # rien n'a été présenté comme une comparaison/synthèse complète
-    assert operation not in r.donnees  # pas de bloc "comparaison"/"synthese"
+    assert r.succes  # réponse partielle, pas un refus global
+    assert r.outil == operation
+    assert r.donnees.get("statut") == "partiel"
+    # NB_LOTS_MAX reste appliqué : le document trop volumineux est bien
+    # rejeté explicitement (jamais silencieusement traité ni tronqué).
+    assert "trop_long.pdf" in r.donnees[cle]["documents_en_echec"]
+    assert "trop volumineux" in r.donnees["par_document"]["trop_long.pdf"]["echec"]
+    # seul le document exploitable (autre.pdf) est réellement sourcé.
+    assert r.sources
+    assert {s.doc_id for s in r.sources} == {"AUT"}
 
 
 def test_au_dela_de_nb_lots_max_map_document_directement(monkeypatch):
@@ -205,7 +253,7 @@ def test_au_dela_de_nb_lots_max_map_document_directement(monkeypatch):
 
     m = mp.map_document(
         mp.DocumentCible(index=1, doc_id="X", libelle="x.pdf", nom_fichier="x.pdf"),
-        "?",
+        _task_spec(),
         llm=_LLMTracant(),
     )
     assert m.echec is not None
@@ -310,7 +358,7 @@ def test_passage_oversized_refuse_le_document_puis_abstention(monkeypatch, opera
     # map_document seul : refus explicite du document géant
     m = mp.map_document(
         mp.DocumentCible(index=1, doc_id="G", libelle="geant.pdf", nom_fichier="geant.pdf"),
-        "?",
+        _task_spec(),
         llm=_LLMTracant(),
     )
     assert m.echec is not None
@@ -318,12 +366,18 @@ def test_passage_oversized_refuse_le_document_puis_abstention(monkeypatch, opera
     assert "D1S1" in m.echec  # citation identifiée
     assert not m.utilisable
 
-    # bout en bout : < 2 documents exploitables -> abstention, pas de crash,
-    # pas de repli SEARCH
+    # bout en bout : le document géant reste rejeté explicitement (jamais
+    # tronqué), mais l'AUTRE document exploitable permet désormais une
+    # réponse PARTIELLE sourcée plutôt qu'un refus global (audit
+    # long-documents, section D) — pas de crash, pas de repli SEARCH.
     fn = comparer if operation == "compare" else synthetiser_documents
     r = fn("?", ["geant.pdf", "autre.pdf"], llm=_LLMTracant())
-    assert not r.succes
+    cle = "comparaison" if operation == "compare" else "synthese"
+
+    assert r.succes
     assert r.outil == operation
-    assert "moins de deux documents" in r.message.lower()
-    assert "geant.pdf" in " ".join(r.donnees.get("documents_en_echec", []))
-    assert operation not in r.donnees
+    assert r.donnees.get("statut") == "partiel"
+    assert "geant.pdf" in r.donnees[cle]["documents_en_echec"]
+    assert "passage unique hors budget" in r.donnees["par_document"]["geant.pdf"]["echec"]
+    assert r.sources
+    assert {s.doc_id for s in r.sources} == {"H"}

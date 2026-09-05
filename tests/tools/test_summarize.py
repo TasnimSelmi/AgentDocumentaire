@@ -210,8 +210,10 @@ def test_document_volumineux_plusieurs_lots_puis_synthese(monkeypatch):
 
 
 def test_synthese_hierarchique_a_plusieurs_niveaux(monkeypatch):
-    """`_synthetiser` regroupe puis récurse quand un seul appel ne suffit pas."""
-    monkeypatch.setattr(summarize, "LIMITE_CARACTERES_LOT", 50)
+    """`_synthetiser` regroupe puis récurse quand un seul appel ne suffit pas,
+    en respectant le budget d'entrée RÉEL (plus `LIMITE_CARACTERES_LOT`,
+    qui ne concerne plus que le MAP — voir l'audit long-documents)."""
+    monkeypatch.setattr(summarize, "budget_caracteres_entree_llm", lambda: 1750)
 
     textes = [f"résumé partiel numéro {i} bien assez long pour compter" for i in range(6)]
     llm = LLMScripte(lambda systeme, utilisateur, n: f"méta-résumé #{n}")
@@ -224,6 +226,49 @@ def test_synthese_hierarchique_a_plusieurs_niveaux(monkeypatch):
     assert resultat
     # Un seul appel n'aurait pas suffi : la réduction a dû se faire en plusieurs étapes.
     assert len(llm.appels) > 1
+    # Invariant : aucun prompt envoyé ne dépasse le budget disponible.
+    for systeme, utilisateur in llm.appels:
+        assert len(systeme) + len(utilisateur) <= 1750
+
+
+def test_synthese_refus_explicite_si_non_convergence(monkeypatch):
+    """Budget trop petit même pour le gabarit minimal -> refus métier
+    explicite (`ErreurReduceNonConvergent`), jamais un envoi hors budget ni
+    une boucle infinie."""
+    monkeypatch.setattr(summarize, "budget_caracteres_entree_llm", lambda: 10)
+
+    textes = ["résumé partiel un peu long pour ce budget minuscule" for _ in range(4)]
+    llm = LLMScripte(lambda systeme, utilisateur, n: f"méta-résumé #{n}")
+    contexte = _contexte(llm)
+
+    with pytest.raises(summarize.ErreurReduceNonConvergent):
+        summarize._synthetiser(textes, objectif=None, format_resume="court", contexte=contexte)
+
+    # Aucun appel LLM hors budget n'a été tenté.
+    assert llm.appels == []
+
+
+def test_synthese_document_complet_refus_propre_si_non_convergence(monkeypatch):
+    """Bout en bout (Cas A) : une non-convergence du reduce (`_synthetiser`)
+    devient un `ResultatOutil.echec` lisible, jamais une exception qui
+    remonte telle quelle (ex. "context length exceeded" d'Ollama)."""
+    passages = [_passage("A", i, f"contenu numero {i} " * 3) for i in range(8)]
+    _resoudre_vers(monkeypatch, "A", passages)
+    monkeypatch.setattr(summarize, "LIMITE_CARACTERES_LOT", 120)
+
+    def _synthetiser_explose(*args, **kwargs):
+        raise summarize.ErreurReduceNonConvergent("document trop fragmenté (test)")
+
+    monkeypatch.setattr(summarize, "_synthetiser", _synthetiser_explose)
+
+    llm = LLMScripte(_cite_tout)
+    outil = summarize.definir_summarize()
+    resultat = outil.executer(contexte=_contexte(llm), documents=["A"])
+
+    assert not resultat.succes
+    assert "Synthèse finale impossible" in resultat.message
+    assert "document trop fragmenté" in resultat.message
+    assert "context length" not in resultat.message.lower()
 
 
 # ===========================================================================

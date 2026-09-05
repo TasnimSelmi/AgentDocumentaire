@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 _OUTIL = "synthesize"
 
+#: `donnees["statut"]` — voir `src.tools.compare.STATUT_COMPLET/STATUT_PARTIEL`
+#: (même principe, même seuil, module volontairement découplé).
+STATUT_COMPLET = "complet"
+STATUT_PARTIEL = "partiel"
+
 
 @dataclass
 class ResultatSynthese:
@@ -58,6 +63,7 @@ RÈGLES ABSOLUES
 - Ne fusionne jamais deux documents dans une même affirmation si une seule analyse la soutient.
 - Si les documents divergent, CONSERVE la divergence dans "divergences" — ne la lisse pas, ne choisis pas un camp.
 - Si un document n'apporte rien de pertinent, ne fabrique rien pour lui.
+- Si UN SEUL document apporte des éléments exploitables (les autres n'apportant rien), ne fabrique AUCUN theme_commun ni AUCUNE divergence : décris uniquement le contenu de ce document (via "elements_complementaires" et/ou "synthese_transversale"), avec ses citations.
 - "synthese_transversale" : un paragraphe court qui articule les points ci-dessus, avec citations. Mets null si les analyses ne permettent pas une synthèse honnête.
 
 Réponds UNIQUEMENT avec un objet JSON strict :
@@ -119,7 +125,7 @@ def synthetiser_documents(
     )
     utilisables, sans_evidence, echecs = diagnostic_maps(maps)
 
-    if len(utilisables) < 2:
+    if not utilisables:
         detail = []
         if sans_evidence:
             detail.append("sans information pertinente : " + ", ".join(sans_evidence))
@@ -127,13 +133,20 @@ def synthetiser_documents(
             detail.append("analyse impossible : " + ", ".join(echecs))
         return ResultatOutil.echec(
             _OUTIL,
-            "Synthèse impossible : moins de deux documents apportent des éléments "
-            "pertinents pour la question"
+            "Synthèse impossible : aucun document ne fournit d'élément "
+            "exploitable pour la question"
             + (" (" + " ; ".join(detail) + ")" if detail else "")
             + ".",
             documents_sans_evidence=sans_evidence,
             documents_en_echec=echecs,
         )
+
+    # Au moins UNE preuve exploitable existe : la synthèse peut être tentée.
+    # "partiel" si un ou plusieurs des documents demandés n'ont rien apporté
+    # (sans_evidence/échec) — le REDUCE ci-dessous est explicitement instruit
+    # (voir `_SYSTEME_REDUCE`) de ne jamais fabriquer de theme_commun ni de
+    # divergence pour un document sans preuve.
+    statut = STATUT_PARTIEL if (sans_evidence or echecs) else STATUT_COMPLET
 
     autorisees = citations_autorisees(maps)
     systeme = _systeme_reduce(profil_domaine)
@@ -219,14 +232,23 @@ def synthetiser_documents(
             f"{len(rejets)} affirmation(s) sans citation valide écartée(s)."
         )
 
+    if statut == STATUT_PARTIEL:
+        message = (
+            f"Synthèse partielle : {len(utilisables)}/{len(maps)} document(s) "
+            "apportent des éléments exploitables ; voir les limitations."
+        )
+    else:
+        message = (
+            f"Synthèse transversale de {len(maps)} documents "
+            f"({len(utilisables)} avec des éléments pertinents)."
+        )
+
     return ResultatOutil(
         outil=_OUTIL,
         succes=True,
-        message=(
-            f"Synthèse transversale de {len(maps)} documents "
-            f"({len(utilisables)} avec des éléments pertinents)."
-        ),
+        message=message,
         donnees={
+            "statut": statut,
             "synthese": asdict(resultat),
             "par_document": {
                 m.cible.libelle: {

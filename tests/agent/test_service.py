@@ -238,10 +238,10 @@ def test_query_bout_en_bout_atteint_le_coeur_p1(monkeypatch) -> None:
     )
 
     class _LLM:
-        def invoke(self, messages):
+        def invoke(self, messages, think: bool | None = None):
             if "deux intentions possibles" in messages[0].content:
                 return AIMessage(content='{"intention": "SEARCH"}')
-            return LLMScripte().invoke(messages)
+            return LLMScripte().invoke(messages, think=think)
 
     service = AgentService(options_session={"llm": _LLM(), "charger_profil_domaine": False})
     reponse = service.query("Compare rapport_alpha.pdf et rapport_beta.pdf.")

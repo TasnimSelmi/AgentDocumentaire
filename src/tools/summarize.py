@@ -49,6 +49,7 @@ from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel, Field
 
+from src.agent.multidoc_pipeline import budget_caracteres_entree_llm
 from src.config import get_profil
 from src.llm.common import (
     bloc_profil_domaine,
@@ -265,11 +266,17 @@ def _filtrer_sources_documents(
 # tronque jamais : répartit en lots supplémentaires à la place).
 LIMITE_CARACTERES_LOT = 16_000
 
-# Borne la réduction hiérarchique du mode document complet : un document dont
-# les résumés partiels ne convergent pas en un seul texte au bout de ce
-# nombre de niveaux force une dernière synthèse unique plutôt que de
-# récurser indéfiniment (voir `_synthetiser`).
-_PROFONDEUR_MAX_SYNTHESE = 3
+# Borne de sécurité DÉTERMINISTE contre une non-convergence pathologique du
+# reduce hiérarchique (voir `_synthetiser`) : jamais une boucle infinie. Ne
+# force JAMAIS un envoi hors budget — au-delà de cette profondeur sans avoir
+# convergé vers un texte unique, `_synthetiser` lève `ErreurReduceNonConvergent`
+# (refus métier explicite), jamais une concaténation forcée. Une réduction
+# saine converge en quelques niveaux (chaque niveau réduit le nombre de
+# textes d'un facteur >= 2, borné par la taille de sortie du LLM) ; 12
+# niveaux couvrent très largement même un document extrêmement fragmenté
+# (jusqu'à ~4000 lots avec un facteur de réduction de 2 par niveau) sans
+# jamais devenir un vrai risque de boucle infinie.
+_PROFONDEUR_MAX_SYNTHESE = 12
 
 
 def _partitionner(
@@ -745,6 +752,28 @@ def _executer_summarize(
 # ===========================================================================
 
 
+class ErreurReduceNonConvergent(RuntimeError):
+    """
+    Le reduce hiérarchique de `_synthetiser` n'a pas pu produire un résumé
+    unique dans le budget d'entrée réellement disponible
+    (`budget_caracteres_entree_llm`), même après plusieurs niveaux de
+    réduction — jamais une exception Ollama brute ("context length
+    exceeded") : un refus métier explicite, capturé par l'appelant
+    (`_executer_summarize_document_complet`) et rendu comme un
+    `ResultatOutil.echec` lisible.
+    """
+
+
+def _cout_gabarit_synthese(objectif: str | None, format_resume: str) -> int:
+    """
+    Coût fixe (hors résumés partiels eux-mêmes) du prompt utilisateur de
+    synthèse, obtenu en construisant le VRAI gabarit avec zéro résumé
+    partiel — aucune duplication du texte du prompt : la seule source de
+    vérité reste `_message_utilisateur_synthese`.
+    """
+    return len(_message_utilisateur_synthese([], objectif, format_resume))
+
+
 def _synthetiser(
     textes: list[str],
     *,
@@ -754,47 +783,94 @@ def _synthetiser(
     profondeur: int = 0,
 ) -> str:
     """
-    Réduit une liste de résumés partiels (étape reduce du map-reduce).
+    Réduit une liste de résumés partiels (étape reduce du map-reduce) en un
+    résumé unique, hiérarchique et ADAPTATIF au budget d'entrée RÉEL d'un
+    appel LLM (`budget_caracteres_entree_llm` — seule source de vérité du
+    projet, cf. `src.agent.multidoc_pipeline`, déjà utilisée par
+    COMPARE/SYNTHESIZE pour la même garantie).
 
-    Un seul appel LLM si leur concaténation tient dans le budget d'un
-    prompt. Sinon, les regroupe d'abord en lots (`_partitionner`, sans
-    jamais en abandonner un) et réduit chaque lot en un méta-résumé avant de
-    récurser sur ces méta-résumés — une réduction hiérarchique bornée par
-    `_PROFONDEUR_MAX_SYNTHESE`, pas une récursion non bornée.
+    Invariant : AUCUN appel `invoquer_llm` de cette fonction ne reçoit un
+    prompt (système + utilisateur) dépassant ce budget — la taille est
+    calculée et vérifiée AVANT chaque appel, jamais après. Si un seul appel
+    ne suffit pas, les résumés sont regroupés en lots compatibles avec le
+    budget et chaque lot est réduit indépendamment, avant de récurser sur
+    les résultats. Si la réduction ne converge pas en `_PROFONDEUR_MAX_SYNTHESE`
+    niveaux (borne de sécurité déterministe contre une non-convergence
+    pathologique), `ErreurReduceNonConvergent` est levée — jamais une
+    concaténation forcée hors budget.
     """
 
     if len(textes) == 1:
         return textes[0]
 
-    taille_totale = sum(len(texte) + 8 for texte in textes)
+    systeme = _message_systeme(contexte)
+    budget = budget_caracteres_entree_llm()
 
-    if taille_totale <= LIMITE_CARACTERES_LOT or profondeur >= _PROFONDEUR_MAX_SYNTHESE:
-        if taille_totale > LIMITE_CARACTERES_LOT:
-            logger.warning(
-                "Synthèse forcée en un seul appel au-delà de la profondeur "
-                "maximale (%d résumés partiels, %d caractères cumulés) : "
-                "un document exceptionnellement fragmenté peut dépasser la "
-                "fenêtre de contexte du LLM.",
-                len(textes),
-                taille_totale,
+    utilisateur = _message_utilisateur_synthese(textes, objectif, format_resume)
+    if len(systeme) + len(utilisateur) <= budget:
+        return invoquer_llm(contexte.llm, systeme=systeme, utilisateur=utilisateur)
+
+    if profondeur >= _PROFONDEUR_MAX_SYNTHESE:
+        raise ErreurReduceNonConvergent(
+            f"impossible de réduire {len(textes)} résumé(s) partiel(s) dans le "
+            f"budget d'entrée disponible ({budget} c) après {profondeur} "
+            "niveau(x) de réduction hiérarchique : document trop fragmenté "
+            "pour la configuration actuelle (num_ctx / num_predict)."
+        )
+
+    cout_gabarit = len(systeme) + _cout_gabarit_synthese(objectif, format_resume)
+    limite_groupe = budget - cout_gabarit
+    if limite_groupe <= 0:
+        raise ErreurReduceNonConvergent(
+            "le budget d'entrée disponible ne permet même pas le gabarit "
+            "minimal d'un appel de synthèse (num_ctx / num_predict "
+            "insuffisants pour ce modèle)."
+        )
+
+    # Regroupement borné par le budget RÉEL (pas `LIMITE_CARACTERES_LOT`,
+    # sans rapport avec num_ctx) : coût par élément majoré (+60, marge pour
+    # l'en-tête "[Résumé partiel i/N]" et le séparateur du gabarit) —
+    # cohérent avec la marge conservatrice déjà appliquée ailleurs dans le
+    # projet (cf. `_RATIO_CHAR_PAR_TOKEN`). Ne perd jamais un texte : un
+    # texte déjà plus coûteux que `limite_groupe` à lui seul forme son
+    # propre groupe (sa taille réelle est revérifiée avant tout appel LLM,
+    # jamais un envoi hors budget même si cette estimation était trop
+    # optimiste).
+    lots = _partitionner(textes, lambda t: len(t) + 60, limite_groupe)
+
+    meta_resumes: list[str] = []
+    for lot in lots:
+        if len(lot) == 1:
+            # Rien à regrouper à ce niveau pour ce texte : il avance tel
+            # quel au niveau suivant (même sémantique qu'un résumé unique
+            # en tête de fonction — jamais reformulé pour lui-même).
+            meta_resumes.append(lot[0])
+            continue
+
+        utilisateur_lot = _message_utilisateur_synthese(lot, objectif, format_resume)
+        taille_lot = len(systeme) + len(utilisateur_lot)
+        if taille_lot > budget:
+            # Garde-fou ultime : jamais un envoi hors budget, même si le
+            # regroupement ci-dessus s'est révélé trop optimiste.
+            raise ErreurReduceNonConvergent(
+                f"un groupe de {len(lot)} résumé(s) partiel(s) dépasse le "
+                f"budget d'entrée ({taille_lot} > {budget} c) malgré le "
+                "regroupement : document trop fragmenté pour la "
+                "configuration actuelle."
             )
-        return invoquer_llm(
-            contexte.llm,
-            systeme=_message_systeme(contexte),
-            utilisateur=_message_utilisateur_synthese(
-                textes, objectif, format_resume
-            ),
+        meta_resumes.append(
+            invoquer_llm(contexte.llm, systeme=systeme, utilisateur=utilisateur_lot)
         )
 
-    lots = _partitionner(textes, len, LIMITE_CARACTERES_LOT)
-    meta_resumes = [
-        invoquer_llm(
-            contexte.llm,
-            systeme=_message_systeme(contexte),
-            utilisateur=_message_utilisateur_synthese(lot, objectif, format_resume),
+    if len(meta_resumes) >= len(textes):
+        # Aucune réduction réelle à ce niveau (regroupement impossible dans
+        # le budget disponible) : poursuivre récurserait indéfiniment sans
+        # jamais converger. Borne déterministe : refus explicite immédiat.
+        raise ErreurReduceNonConvergent(
+            f"le regroupement n'a produit aucune réduction ({len(textes)} "
+            "résumé(s) partiel(s) toujours après ce niveau) : budget "
+            "d'entrée trop restreint pour converger de manière fiable."
         )
-        for lot in lots
-    ]
 
     return _synthetiser(
         meta_resumes,
@@ -861,19 +937,36 @@ def _executer_summarize_document_complet(
         LIMITE_CARACTERES_LOT,
     )
 
+    systeme_resume = _message_systeme(contexte)
+    budget_map = budget_caracteres_entree_llm()
+
     resumes_partiels: list[str] = []
     for numero, lot in enumerate(lots, start=1):
         contexte_lot = "\n\n---\n\n".join(
             _bloc_source(source, citation) for citation, source in lot
         )
         try:
+            utilisateur_lot = _message_utilisateur_lot(
+                contexte_lot, objectif, numero, len(lots)
+            )
+            taille_lot = len(systeme_resume) + len(utilisateur_lot)
+            if taille_lot > budget_map:
+                # Même invariant que le reduce (`_synthetiser`) : jamais un
+                # appel LLM hors budget. Ne peut survenir que pour un
+                # passage individuel anormalement volumineux (LIMITE_CARACTERES_LOT
+                # tient normalement dans le budget par construction) ou une
+                # configuration num_ctx/num_predict très restreinte.
+                raise ValueError(
+                    f"lot {numero}/{len(lots)} hors budget d'entrée "
+                    f"({taille_lot} > {budget_map} c) — document non "
+                    "exploitable dans la configuration actuelle "
+                    "(num_ctx / num_predict)."
+                )
             resumes_partiels.append(
                 invoquer_llm(
                     contexte.llm,
-                    systeme=_message_systeme(contexte),
-                    utilisateur=_message_utilisateur_lot(
-                        contexte_lot, objectif, numero, len(lots)
-                    ),
+                    systeme=systeme_resume,
+                    utilisateur=utilisateur_lot,
                 )
             )
         except Exception as exc:  # noqa: BLE001

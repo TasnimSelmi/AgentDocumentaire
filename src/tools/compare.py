@@ -35,6 +35,17 @@ logger = logging.getLogger(__name__)
 
 _OUTIL = "compare"
 
+#: `donnees["statut"]` — REDUCE MINIMAL pour réduire les refus globaux (audit
+#: long-documents, section D) : "complet" si TOUS les documents résolus ont
+#: apporté des éléments exploitables, "partiel" si au moins un document a
+#: contribué mais qu'au moins un autre n'a rien apporté (sans_evidence ou
+#: échec). Le refus dur (`ResultatOutil.echec`) reste réservé à ZÉRO document
+#: exploitable — jamais de conclusion comparative fabriquée pour un document
+#: sans preuve, jamais de provenance inventée : la validation par citation
+#: ci-dessous (inchangée) s'applique identiquement aux deux statuts.
+STATUT_COMPLET = "complet"
+STATUT_PARTIEL = "partiel"
+
 
 @dataclass
 class ResultatCompare:
@@ -58,6 +69,7 @@ RÈGLES ABSOLUES
 - Ne fusionne jamais deux documents dans une même affirmation si une seule analyse la soutient : attribue-la au bon document.
 - Si les documents divergent ou se contredisent, conserve la divergence EXPLICITEMENT dans "contradictions" ou "differences" — ne la lisse pas.
 - Si un document n'apporte aucune information pertinente, ne fabrique rien pour lui.
+- Si UN SEUL document apporte des éléments exploitables (les autres n'apportant rien), ne fabrique AUCUNE comparaison : laisse "points_communs", "differences" et "contradictions" VIDES, et utilise uniquement "positions_par_document" pour décrire ce que ce document apporte, avec ses citations.
 - La "conclusion" est facultative : ne la fournis que si les analyses la soutiennent réellement, sinon mets null.
 
 Réponds UNIQUEMENT avec un objet JSON strict :
@@ -122,7 +134,7 @@ def comparer(
     )
     utilisables, sans_evidence, echecs = diagnostic_maps(maps)
 
-    if len(utilisables) < 2:
+    if not utilisables:
         detail = []
         if sans_evidence:
             detail.append("sans information pertinente : " + ", ".join(sans_evidence))
@@ -130,13 +142,20 @@ def comparer(
             detail.append("analyse impossible : " + ", ".join(echecs))
         return ResultatOutil.echec(
             _OUTIL,
-            "Comparaison impossible : moins de deux documents apportent des "
-            "éléments pertinents pour la question"
+            "Comparaison impossible : aucun document ne fournit d'élément "
+            "exploitable pour la question"
             + (" (" + " ; ".join(detail) + ")" if detail else "")
             + ".",
             documents_sans_evidence=sans_evidence,
             documents_en_echec=echecs,
         )
+
+    # Au moins UNE preuve exploitable existe : la comparaison peut être
+    # tentée. "partiel" si un ou plusieurs des documents demandés n'ont rien
+    # apporté (sans_evidence/échec) — le REDUCE ci-dessous est explicitement
+    # instruit (voir `_SYSTEME_REDUCE`) de ne jamais fabriquer de comparaison
+    # pour un document sans preuve.
+    statut = STATUT_PARTIEL if (sans_evidence or echecs) else STATUT_COMPLET
 
     autorisees = citations_autorisees(maps)
     systeme = _systeme_reduce(profil_domaine)
@@ -237,14 +256,23 @@ def comparer(
             f"{len(rejets)} affirmation(s) sans citation valide écartée(s)."
         )
 
+    if statut == STATUT_PARTIEL:
+        message = (
+            f"Comparaison partielle : {len(utilisables)}/{len(maps)} document(s) "
+            "apportent des éléments exploitables ; voir les limitations."
+        )
+    else:
+        message = (
+            f"Comparaison de {len(maps)} documents "
+            f"({len(utilisables)} avec des éléments pertinents)."
+        )
+
     return ResultatOutil(
         outil=_OUTIL,
         succes=True,
-        message=(
-            f"Comparaison de {len(maps)} documents "
-            f"({len(utilisables)} avec des éléments pertinents)."
-        ),
+        message=message,
         donnees={
+            "statut": statut,
             "comparaison": asdict(resultat),
             "par_document": {
                 m.cible.libelle: {

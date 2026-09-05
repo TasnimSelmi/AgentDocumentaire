@@ -215,37 +215,66 @@ def test_au_dela_de_la_limite_refus(monkeypatch) -> None:
     assert "4" in r.message
 
 
-def test_un_document_sans_evidence_pertinente_refus(monkeypatch) -> None:
+def test_un_document_sans_evidence_pertinente_partiel(monkeypatch) -> None:
+    """Audit long-documents, section D : 1 document exploitable sur 2 ->
+    réponse PARTIELLE sourcée, jamais un refus global (ancien comportement)."""
     _corpus_2(monkeypatch, b_sans_evidence=True)
     r = comparer(
         "Compare rapport_a.pdf et rapport_b.pdf.",
         ["rapport_a.pdf", "rapport_b.pdf"],
         llm=LLMScripte(),
     )
+    assert r.succes
+    assert r.donnees.get("statut") == "partiel"
+    assert "rapport_b.pdf" in r.donnees["comparaison"]["documents_sans_evidence"]
+    # Preuve réellement disponible (document A) conservée et sourcée.
+    assert r.sources
+    assert {s.doc_id for s in r.sources} == {"A"}
+
+
+def test_aucun_document_exploitable_refus_dur(monkeypatch) -> None:
+    """Zéro preuve exploitable : le refus dur reste (seul cas restant)."""
+    cabler_corpus(
+        monkeypatch,
+        multidoc_pipeline,
+        fiches={"rapport_a.pdf": "A", "rapport_b.pdf": "B"},
+        passages_par_doc={
+            "A": [passage("A", 1, SANS_EVIDENCE, page=1)],
+            "B": [passage("B", 1, SANS_EVIDENCE, page=1)],
+        },
+    )
+    r = comparer(
+        "Compare rapport_a.pdf et rapport_b.pdf.",
+        ["rapport_a.pdf", "rapport_b.pdf"],
+        llm=LLMScripte(),
+    )
     assert not r.succes
-    assert "moins de deux documents" in r.message.lower()
-    assert "rapport_b.pdf" in " ".join(r.donnees.get("documents_sans_evidence", []))
+    assert "aucun document ne fournit" in r.message.lower()
+    assert not r.sources
 
 
-def test_map_llm_echoue_sur_un_document_refus(monkeypatch) -> None:
+def test_map_llm_echoue_sur_un_document_partiel(monkeypatch) -> None:
+    """1 document en échec technique, l'autre exploitable -> PARTIEL, pas un
+    refus global (l'échec technique bloquant ne concerne que ZÉRO preuve)."""
     _corpus_2(monkeypatch)
     r = comparer(
         "Compare rapport_a.pdf et rapport_b.pdf.",
         ["rapport_a.pdf", "rapport_b.pdf"],
         llm=make_llm_map_echoue("rapport_b.pdf"),
     )
-    assert not r.succes
-    assert "rapport_b.pdf" in " ".join(r.donnees.get("documents_en_echec", []))
+    assert r.succes
+    assert r.donnees.get("statut") == "partiel"
+    assert "rapport_b.pdf" in r.donnees["comparaison"]["documents_en_echec"]
 
 
 def test_reduce_llm_echoue_refus(monkeypatch) -> None:
     _corpus_2(monkeypatch)
 
     class _LLM:
-        def invoke(self, messages):
+        def invoke(self, messages, think: bool | None = None):
             if "COMPARAISON" in messages[0].content:
                 raise RuntimeError("REDUCE KO")
-            return LLMScripte().invoke(messages)
+            return LLMScripte().invoke(messages, think=think)
 
     r = comparer(
         "Compare rapport_a.pdf et rapport_b.pdf.",

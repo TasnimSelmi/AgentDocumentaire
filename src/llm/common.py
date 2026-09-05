@@ -83,8 +83,21 @@ def invoquer_llm(
     *,
     systeme: str,
     utilisateur: str,
+    reasoning: bool | None = None,
 ) -> str:
-    """Exécute un appel LLM simple avec messages système et utilisateur."""
+    """
+    Exécute un appel LLM simple avec messages système et utilisateur.
+
+    `reasoning` : contrôle le raisonnement `<think>` du modèle sous-jacent
+    (qwen3 via Ollama), traduit en kwarg `think=` au moment de l'appel —
+    c'est le nom réellement transmis jusqu'au client `ollama` (confirmé
+    empiriquement : `ChatOllama.invoke(messages, think=False)` supprime la
+    génération du raisonnement, `eval_count` divisé par ~16 sur un prompt de
+    test, déterministe, `done_reason="stop"`). `None` (défaut) : comportement
+    inchangé, AUCUN kwarg supplémentaire n'est transmis à `llm.invoke` — les
+    appelants existants (classify / summarize / extract / nodes) et leurs
+    doublures de test (`invoke(self, messages)`) restent inchangés.
+    """
     if llm is None:
         raise RuntimeError("Aucun LLM n'a été fourni.")
 
@@ -93,7 +106,10 @@ def invoquer_llm(
         HumanMessage(content=utilisateur),
     ]
 
-    reponse = llm.invoke(messages)
+    if reasoning is None:
+        reponse = llm.invoke(messages)
+    else:
+        reponse = llm.invoke(messages, think=reasoning)
 
     texte = texte_message(reponse)
 

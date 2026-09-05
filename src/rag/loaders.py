@@ -266,26 +266,51 @@ def _configurer_tesseract(settings: Settings) -> None:
 
 def _ocr_pdf(chemin: Path, cfg_ocr: ConfigOCR, settings: Settings) -> list[Page]:
     """
-    Rendu de chaque page en image puis OCR Tesseract.
-    Coûteux : plafonné par cfg_ocr.pages_max.
+    Rendu de chaque page en image puis OCR Tesseract, PAR LOTS de
+    `cfg_ocr.pages_max` pages (ex. 300 pages, pages_max=20 -> 15 lots
+    successifs 1-20, 21-40, ..., 281-300, fusionnés dans l'ordre).
+
+    `pages_max` borne désormais le coût (mémoire, durée) d'UN lot de rendu,
+    plus jamais le document entier : l'ancien comportement rendait TOUTES
+    les pages puis ne conservait que les `pages_max` premières, abandonnant
+    silencieusement le reste (voir l'audit long-documents — un PDF scanné
+    de 300 pages n'était en réalité traité que sur ses 20 premières, sans
+    qu'aucun appelant ne puisse le détecter). Un document scanné, quelle
+    que soit sa longueur, est désormais intégralement couvert.
     """
     import pytesseract
-    from pdf2image import convert_from_path
+    from pdf2image import convert_from_path, pdfinfo_from_path
 
     _configurer_tesseract(settings)
 
-    images = convert_from_path(str(chemin), dpi=cfg_ocr.dpi)
-    if len(images) > cfg_ocr.pages_max:
+    try:
+        nb_pages = int(pdfinfo_from_path(str(chemin)).get("Pages") or 0)
+    except Exception as exc:  # noqa: BLE001 — repli : rendu en un seul lot, sans troncature
         logger.warning(
-            "%s : %d pages, OCR limité à %d.",
-            chemin.name, len(images), cfg_ocr.pages_max,
+            "%s : nombre de pages indisponible (%s), OCR en un seul lot.",
+            chemin.name, exc,
         )
-        images = images[: cfg_ocr.pages_max]
+        nb_pages = 0
+
+    pas = max(cfg_ocr.pages_max, 1)
+    bornes = (
+        [(debut, min(debut + pas - 1, nb_pages)) for debut in range(1, nb_pages + 1, pas)]
+        if nb_pages > 0
+        else [(None, None)]  # nombre de pages inconnu : rendu complet, un seul lot
+    )
 
     pages: list[Page] = []
-    for i, image in enumerate(images, start=1):
-        texte = pytesseract.image_to_string(image, lang=cfg_ocr.langues)
-        pages.append(Page(numero=i, texte=texte.strip()))
+    for debut, fin in bornes:
+        if debut is not None:
+            logger.info("%s : OCR pages %d-%d/%d…", chemin.name, debut, fin, nb_pages)
+        images = convert_from_path(
+            str(chemin), dpi=cfg_ocr.dpi, first_page=debut, last_page=fin,
+        )
+        decalage = (debut - 1) if debut is not None else 0
+        for i, image in enumerate(images, start=1):
+            texte = pytesseract.image_to_string(image, lang=cfg_ocr.langues)
+            pages.append(Page(numero=decalage + i, texte=texte.strip()))
+
     return pages
 
 

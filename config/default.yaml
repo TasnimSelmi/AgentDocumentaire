@@ -40,7 +40,7 @@ ocr:
   active: true
   langues: "fra+ara+eng"
   dpi: 300
-  pages_max: 20 # garde-fou sur les gros PDF scannés
+  pages_max: 20 # taille d'UN lot de rendu OCR (pas une limite globale du document, cf. audit long-documents)
 
 normalisation:
   minuscules: true

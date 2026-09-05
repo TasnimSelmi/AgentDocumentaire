@@ -23,11 +23,11 @@ class _LLMRoutage:
     """Répond SEARCH aux désambiguïsateurs ; sinon délègue au LLM scripté
     multi-doc (MAP/REDUCE)."""
 
-    def invoke(self, messages):
+    def invoke(self, messages, think: bool | None = None):
         systeme = messages[0].content
         if "deux intentions possibles" in systeme:
             return AIMessage(content='{"intention": "SEARCH"}')
-        return LLMScripte().invoke(messages)
+        return LLMScripte().invoke(messages, think=think)
 
 
 def _session(query: str):
@@ -192,7 +192,7 @@ class _LLMDesambigInterdit:
     def __init__(self) -> None:
         self.appels_desambig = 0
 
-    def invoke(self, messages):
+    def invoke(self, messages, think: bool | None = None):
         systeme = messages[0].content
         if "Tu distingues deux intentions possibles" in systeme:
             self.appels_desambig += 1
@@ -200,7 +200,7 @@ class _LLMDesambigInterdit:
                 "désambiguïsateur de zone grise appelé alors que le signal "
                 "multi-document est explicite"
             )
-        return LLMScripte().invoke(messages)
+        return LLMScripte().invoke(messages, think=think)
 
 
 @pytest.mark.parametrize(
