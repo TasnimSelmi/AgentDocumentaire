@@ -26,9 +26,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.agent.response import STATUT_ERREUR, STATUT_REFUS, STATUT_SUCCES, AgentResponse
-from src.agent.service import CODE_REQUETE_INVALIDE
+from src.agent.service import CODE_CORPUS_INVALIDE, CODE_REQUETE_INVALIDE
 from src.observability import emettre_http_unhandled_error
 from src.sources.base import ErreurSource
+
+#: Codes `AgentResponse.error["code"]` traités comme une entrée client
+#: invalide (422), jamais comme un échec technique (500).
+_CODES_REQUETE_CLIENT_INVALIDE = frozenset({CODE_REQUETE_INVALIDE, CODE_CORPUS_INVALIDE})
 
 HTTP_OK = 200
 HTTP_REQUETE_INVALIDE = 422
@@ -51,7 +55,7 @@ def statut_http_pour(reponse: AgentResponse) -> int:
         return HTTP_OK
     if reponse.status == STATUT_ERREUR:
         code = (reponse.error or {}).get("code")
-        if code == CODE_REQUETE_INVALIDE:
+        if code in _CODES_REQUETE_CLIENT_INVALIDE:
             return HTTP_REQUETE_INVALIDE
         return HTTP_ERREUR_INTERNE
     # `status` hors nomenclature : traité comme un échec technique.
@@ -65,7 +69,7 @@ def corps_reponse_query(reponse: AgentResponse) -> dict[str, Any]:
     corps = reponse.vers_dict()
     if reponse.status == STATUT_ERREUR:
         code = (reponse.error or {}).get("code")
-        if code != CODE_REQUETE_INVALIDE:
+        if code not in _CODES_REQUETE_CLIENT_INVALIDE:
             corps["error"] = dict(ERREUR_INTERNE_PUBLIQUE)
     return corps
 

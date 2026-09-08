@@ -16,8 +16,8 @@ multi-document déterministe), **P1.5** (capacités COMPARE / SYNTHESIZE),
 **P1.6** (défaut **EX-03** — résolution documentaire contextuelle d'EXTRACT
 supprimée), **P1.7** (validation finale, cœur agentique **candidat au gel**),
 **P2.1** (façade applicative `AgentService`), **P2.2** (abstraction générique
-des sources documentaires), **P2.3** (API HTTP FastAPI mince) et **P2.4**
-(observabilité transverse).
+des sources documentaires), **P2.3** (API HTTP FastAPI mince), **P2.4**
+(observabilité transverse) et **P2.5** (interface Streamlit cliente HTTP).
 
 ### P1.3 — contrat de sortie public `AgentResponse` (`src/agent/response.py`)
 - Point d'entrée public `executer_agent(requete)` → `AgentResponse`
@@ -241,6 +241,72 @@ des sources documentaires), **P2.3** (API HTTP FastAPI mince) et **P2.4**
   `tests/api/test_observability.py` + `tests/api/` complété. Suite complète
   **verte**. Documentation :
   [`docs/P2.4_OBSERVABILITY.md`](docs/P2.4_OBSERVABILITY.md).
+
+### P2.5 — interface Streamlit (`src/ui/`)
+
+- Frontend **client HTTP pur** : `Streamlit → ApiClient → FastAPI (P2.3 / P2.4)
+  → Services / Agent / RAG`. `src/ui/**` **n'importe jamais** `src.agent` /
+  `src.rag` / `src.tools` / `src.sources`, n'accède ni à Qdrant ni à Ollama, ne
+  fait aucune ingestion directe et ne duplique pas le routage (garde-fou
+  `tests/ui/test_architecture.py`). Aucune couche gelée modifiée ;
+  `src/api/**` **non modifié** (le contrat et les en-têtes de corrélation P2.4
+  suffisaient).
+- **`ApiClient`** (`src/ui/api_client.py`, `httpx`) : `health()` /
+  `query(question)` / `ingest(source, reinitialiser, limite)`. Timeouts
+  explicites par endpoint (surchargeables : `ADOC_HTTP_TIMEOUT_*`). **Aucun
+  retry** sur `POST /query` ni `POST /ingestion` (`HTTPTransport(retries=0)`) —
+  un retry pourrait dupliquer une exécution ou une ingestion. Erreurs
+  **typées** — `ApiUnavailableError`, `ApiTimeoutError`, `ApiHttpError`
+  (`.status_code` distingue `422` / `500` / `503`, `.detail` **sûr**,
+  `.execution_id`), `ApiResponseError` — jamais de stack ni de message
+  technique backend. Parsing JSON **défensif et total**. `X-Request-Id` /
+  `X-Execution-Id` récupérés sur toutes les réponses. `ApiClient` ne connaît
+  aucune logique agentique.
+- **Modèles sûrs** (`src/ui/models.py`, stdlib pur) : `QueryResult`,
+  `IngestionResult`, `SourceItem`, `HealthResult` — immuables, ne portent
+  **que l'affichable**. Pas de `data` / `metadata` / `error.message` /
+  `error.stack` ; les listes `erreurs` / `avertissements` de
+  `RapportIngestion` (chemins possibles) **ne sont pas** reprises, seulement
+  les compteurs. Impossible structurellement de rendre un prompt, une
+  chain-of-thought, un chemin local ou un message technique.
+- **Interface** (`src/ui/app.py`, orchestrateur ; `components.py`) : en-tête
+  (logo INSY2S si asset local autorisé, sinon mot-symbole ; titre ; indicateur
+  d'état API) ; sidebar « Espace documentaire » (état service, source logique,
+  bouton Synchroniser, limite optionnelle, compteurs du dernier
+  `RapportIngestion`) ; zone principale (question naturelle, Envoyer, spinner,
+  réponse, badges statut / **capacité détectée** / nb sources, warnings,
+  sources détaillées, expander « Informations d'exécution » :
+  Execution ID / Request ID / capability / status / nb sources). **Aucun
+  sélecteur** SEARCH / SUMMARIZE / CLASSIFY / EXTRACT / COMPARE / SYNTHESIZE :
+  le routage reste 100 % serveur.
+- **Refus & erreurs** : `status="refusal"` (HTTP 200) rendu comme résultat
+  métier neutre (« Le système ne dispose pas d'éléments suffisamment fiables
+  pour répondre. »), pas une panne. `422` → avertissement clair ; `500` →
+  « Une erreur interne est survenue. » + Execution ID pour le support ;
+  `503` → « Le service documentaire est temporairement indisponible. » ;
+  timeout / API hors ligne / réponse illisible → messages dédiés **sans
+  traceback**. Mapping centralisé, pur, testé (`components.error_view`).
+- **Design system** (`src/ui/styles.py`) : `DesignTokens` (brand_primary /
+  secondary / accent, background, surface, text_primary / muted, success /
+  warning / error, border, radius, shadow) + `build_css`. Palette
+  **PROVISOIRE** clairement identifiée (`IS_OFFICIAL_BRAND is False`) — aucun
+  asset officiel INSY2S disponible ; charte à appliquer en remplaçant
+  `PROVISIONAL_TOKENS`, logo à déposer dans `assets/` (voir
+  `assets/README.md`). CSS **limité** : variables + classes `adoc-*`
+  contrôlées, un seul sélecteur Streamlit toléré (`.stApp`, fond) ; composants
+  natifs privilégiés. Aucun scraping du site `insy2s.com`.
+- **Session** (`src/ui/state.py`, `st.session_state`) UI-only : historique
+  d'échanges **borné à 25** (`trim_history`), dernier échange, dernière
+  ingestion. Jamais renvoyé au backend, aucune mémoire agentique.
+- Dépendance ajoutée : `httpx==0.28.1` (déjà transitive via `qdrant-client` /
+  `ollama` ; épinglée pour l'usage direct par `src/ui/api_client.py`).
+  `streamlit==1.41.1` déjà présent.
+- `tests/ui/**` (client `httpx.MockTransport`, parsing, helpers purs,
+  parcours `streamlit.testing.v1.AppTest` avec `FakeApiClient`, garde-fous
+  d'architecture) — 100 % hors ligne. Lancement :
+  `uvicorn "src.api:create_app" --factory` puis `streamlit run src/ui/app.py`.
+  Documentation : [`docs/P2.5_UI.md`](docs/P2.5_UI.md). Frontend
+  **remplaçable** (React, autre) sans toucher au backend.
 
 ### P1.7 — validation finale (aucune nouvelle capacité)
 - Audit d'architecture, vérification des invariants, `pytest` **658/658**,

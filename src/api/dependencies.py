@@ -19,18 +19,34 @@ from typing import Callable
 
 from src.agent.service import AgentService
 from src.config import get_settings
+from src.rag.corpus import dossier_managed_pour_corpus
 from src.sources import DocumentSource, IngestionService, LocalDocumentSource
 
-#: `nom logique -> fabrique de DocumentSource` (appelée à chaque ingestion).
-FabriqueSource = Callable[[], DocumentSource]
+#: `nom logique -> fabrique de DocumentSource`, appelée à chaque ingestion
+#: avec le `corpus_id` cible — une fabrique qui n'en a pas besoin (`"local"`)
+#: l'ignore simplement. Permet à une source de dériver un emplacement propre
+#: à CE corpus (`"managed"`) sans jamais accepter de chemin du client.
+FabriqueSource = Callable[[str], DocumentSource]
 RegistreSources = dict[str, FabriqueSource]
 
 
 def registre_sources_par_defaut() -> RegistreSources:
-    """MVP : une seule source autorisée, le dossier documentaire configuré
-    (`Settings.documents_dir`). `get_settings()` est relu à chaque appel de la
-    fabrique — pas de chemin figé à la création de l'app."""
-    return {"local": lambda: LocalDocumentSource(get_settings().documents_dir)}
+    """
+    Sources logiques réellement enregistrées côté backend.
+
+    - `"local"` : dossier documentaire configuré globalement
+      (`Settings.documents_dir`), historique, partagé — comportement inchangé.
+    - `"managed"` : stockage propre à CE corpus (`corpus_id`), alimenté par
+      upload de dossier ou import URL (`POST /corpora/{corpus_id}/upload`,
+      `POST /corpora/{corpus_id}/import-url`) — jamais partagé entre corpus.
+
+    `get_settings()` est relu à chaque appel de fabrique — pas de chemin figé
+    à la création de l'app.
+    """
+    return {
+        "local": lambda corpus_id: LocalDocumentSource(get_settings().documents_dir),
+        "managed": lambda corpus_id: LocalDocumentSource(dossier_managed_pour_corpus(corpus_id)),
+    }
 
 
 def agent_service_par_defaut() -> AgentService:

@@ -39,6 +39,7 @@ def test_inner_appele_une_fois_rapport_intact(sink, source_factice):
         "limite": 5,
         "inferer": True,
         "nom_profil": None,
+        "corpus_id": None,
     }
     assert resultat is rapport
 

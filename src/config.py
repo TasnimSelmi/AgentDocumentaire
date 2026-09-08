@@ -13,6 +13,9 @@ déposer un nouveau YAML dans config/schemas/ et ajuster ACTIVE_PROFILE.
 from __future__ import annotations
 
 import datetime as dt
+import os
+import re
+import tempfile
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -71,6 +74,12 @@ class Settings(BaseSettings):
     documents_dir: Path = Path("data/documents")
     logs_dir: Path = Path("data/logs")
 
+    # --- Stockage géré par corpus (upload / import URL) ---
+    # `data/corpora/<corpus_id>/documents/` — jamais src/ ni config/. Chemin
+    # toujours dérivé côté serveur (src.rag.corpus), jamais fourni par un
+    # client. Distinct de `documents_dir` (dossier local partagé historique).
+    corpora_dir: Path = Path("data/corpora")
+
     # --- Profil technique actif (config/schemas/<nom>.yaml) ---
     # Pilote la taxonomie, les métadonnées et le schéma d'extraction utilisés
     # par l'ingestion et le retrieval. Ne pas confondre avec le profil de
@@ -96,6 +105,7 @@ class Settings(BaseSettings):
         "logs_dir",
         "qdrant_path",
         "domain_profiles_dir",
+        "corpora_dir",
         mode="after",
     )
     @classmethod
@@ -597,11 +607,232 @@ def lister_profils() -> list[str]:
     return sorted(p.stem for p in DOSSIER_SCHEMAS.glob("*.yaml"))
 
 
+# ===========================================================================
+# 4bis. Registre des corpus (config/corpus.yaml) — isolation multi-corpus
+# ===========================================================================
+#
+# Un corpus logique = 1 collection Qdrant + 1 registre de fichiers + 1 profil,
+# strictement isolés (voir `src.rag.corpus`, qui dérive collection/registre
+# depuis `corpus_id` et n'accepte jamais un chemin/nom fourni par le client).
+# `corpus_id` est le SEUL identifiant qu'un appelant externe peut fournir.
+
+_MOTIF_CORPUS_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+class ErreurCorpusInvalide(ValueError):
+    """`corpus_id` ne respecte pas le format attendu.
+
+    Format volontairement strict (minuscules, chiffres, `-`, `_`, 1 à 64
+    caractères) : exclut par construction tout séparateur de chemin (`/`,
+    `\\`), tout `..`, tout caractère de contrôle. `corpus_id` ne doit jamais
+    pouvoir être utilisé tel quel comme chemin filesystem non nettoyé.
+    """
+
+
+class CorpusInconnu(ValueError):
+    """`corpus_id` au format valide mais absent de `config/corpus.yaml`."""
+
+
+class CorpusDejaExistant(ValueError):
+    """`corpus_id` déjà déclaré — `POST /corpora` ne réécrit jamais un corpus
+    existant silencieusement."""
+
+
+class CorpusProtege(ValueError):
+    """`corpus_id` ne peut pas être supprimé (le corpus « default » reste la
+    cible implicite de tout appel qui ne fournit pas `corpus_id` — le
+    supprimer casserait la rétrocompatibilité pour tout appelant existant)."""
+
+
+def valider_corpus_id(corpus_id: str) -> str:
+    """Valide et normalise (strip) un `corpus_id`. Lève `ErreurCorpusInvalide`
+    sinon — jamais un chemin ou un nom de collection acceptés tels quels."""
+    valeur = str(corpus_id or "").strip()
+    if not _MOTIF_CORPUS_ID.match(valeur):
+        raise ErreurCorpusInvalide(
+            f"corpus_id invalide : {corpus_id!r}. Attendu : minuscules, "
+            "chiffres, '-', '_', 1 à 64 caractères, ex. « finance »."
+        )
+    return valeur
+
+
+class DerniereIngestion(BaseModel):
+    """Résumé persistant du dernier `RapportIngestion` connu pour ce corpus —
+    seul état dynamique conservé, pour dériver un statut fonctionnel
+    (`src.rag.corpus.statut_corpus`) sans rejouer l'ingestion ni interroger
+    un historique complet (aucune base de données)."""
+
+    statut: Literal["succes", "partiel", "echec"]
+    fichiers_trouves: int = 0
+    fichiers_traites: int = 0
+    fichiers_en_echec: int = 0
+    fichiers_ignores_inchanges: int = 0
+    chunks_indexes: int = 0
+    duree_secondes: float = 0.0
+    a: str = ""  # ISO 8601 UTC
+
+
+class ConfigCorpus(BaseModel):
+    """
+    Une entrée du registre des corpus.
+
+    `profil` / `profil_domaine` à `None` (cas du corpus « default ») se
+    replient sur `Settings.active_profile` / `active_domain_profile` —
+    exactement le comportement d'avant l'introduction du multi-corpus.
+    Un corpus déclaré explicitement (finance, rh, ...) doit fixer ses
+    propres valeurs : jamais de repli implicite sur un réglage global pour
+    un corpus autre que « default ».
+
+    `nom` / `cree_le` / `derniere_ingestion` : le seul état persistant
+    propre au multi-corpus (au-delà du profil), écrit atomiquement par
+    `ecrire_registre_corpus`. Pas de machine à états complexe : le statut
+    fonctionnel exposé à l'API (`src.rag.corpus.statut_corpus`) est
+    RECALCULÉ à chaque lecture depuis ces quelques champs + l'état réel de
+    la collection Qdrant, jamais stocké tel quel.
+    """
+
+    profil: str | None = None
+    profil_domaine: str | None = None
+    source: str = "local"
+    nom: str | None = None
+    cree_le: str | None = None  # ISO 8601 UTC
+    derniere_ingestion: DerniereIngestion | None = None
+
+
+@lru_cache(maxsize=1)
+def get_registre_corpus() -> dict[str, ConfigCorpus]:
+    """
+    Charge `config/corpus.yaml`. Absent -> registre réduit à `default` avec
+    ses valeurs par défaut (aucune régression pour une installation qui
+    n'a pas encore ce fichier).
+    """
+    chemin = DOSSIER_CONFIG / "corpus.yaml"
+    brut = _lire_yaml(chemin) if chemin.exists() else {"default": {}}
+    return {
+        valider_corpus_id(nom): ConfigCorpus(**(entree or {}))
+        for nom, entree in brut.items()
+    }
+
+
+def get_corpus(corpus_id: str | None = None) -> ConfigCorpus:
+    """Résout une entrée du registre des corpus. Lève `CorpusInconnu` si
+    `corpus_id` n'y est pas déclaré."""
+    corpus_id = valider_corpus_id(corpus_id or "default")
+    entree = get_registre_corpus().get(corpus_id)
+    if entree is None:
+        raise CorpusInconnu(f"Corpus inconnu : {corpus_id!r}.")
+    return entree
+
+
+def lister_corpus() -> list[str]:
+    return sorted(get_registre_corpus())
+
+
+def ecrire_registre_corpus(registre: dict[str, ConfigCorpus]) -> None:
+    """
+    Réécrit `config/corpus.yaml` en entier, atomiquement (fichier temporaire
+    + renommage), puis invalide le cache. Seule fonction du module qui
+    écrit ce fichier — toute création/mise à jour de corpus passe par elle,
+    jamais par une écriture directe éparpillée ailleurs.
+    """
+    chemin = DOSSIER_CONFIG / "corpus.yaml"
+    brut = {
+        corpus_id: entree.model_dump(exclude_none=True, mode="json")
+        for corpus_id, entree in registre.items()
+    }
+    contenu = yaml.safe_dump(brut, allow_unicode=True, sort_keys=True)
+
+    fd, chemin_temp = tempfile.mkstemp(
+        dir=str(chemin.parent), prefix=".corpus-", suffix=".yaml.tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(contenu)
+        os.replace(chemin_temp, chemin)
+    finally:
+        if os.path.exists(chemin_temp):
+            os.remove(chemin_temp)
+
+    get_registre_corpus.cache_clear()
+
+
+def creer_corpus(
+    corpus_id: str,
+    *,
+    nom: str | None = None,
+    source: str = "local",
+    profil: str | None = None,
+) -> ConfigCorpus:
+    """
+    Déclare un nouveau corpus logique dans le registre.
+
+    Ne crée AUCUNE collection Qdrant ni registre de fichiers : ceux-ci sont
+    dérivés à la demande, de façon déterministe, par `src.rag.corpus` — la
+    première ingestion les fait exister (`vectorstore.creer_collection`,
+    déjà idempotent). Un corpus fraîchement déclaré est donc immédiatement
+    dans l'état fonctionnel « indexation requise », sans écriture Qdrant
+    inutile.
+
+    Lève `ErreurCorpusInvalide` (format), `CorpusDejaExistant` (doublon).
+    """
+    corpus_id = valider_corpus_id(corpus_id)
+    registre = dict(get_registre_corpus())
+    if corpus_id in registre:
+        raise CorpusDejaExistant(f"Corpus déjà déclaré : {corpus_id!r}.")
+
+    entree = ConfigCorpus(
+        profil=profil,
+        source=source,
+        nom=(nom or corpus_id).strip() or corpus_id,
+        cree_le=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    )
+    registre[corpus_id] = entree
+    ecrire_registre_corpus(registre)
+    return entree
+
+
+def mettre_a_jour_corpus(corpus_id: str, **champs: Any) -> ConfigCorpus:
+    """
+    Met à jour certains champs d'un corpus déjà déclaré (ex.
+    `profil_domaine` après validation d'un profil, `derniere_ingestion`
+    après une synchronisation). Lève `CorpusInconnu` sinon.
+    """
+    corpus_id = valider_corpus_id(corpus_id)
+    registre = dict(get_registre_corpus())
+    actuelle = registre.get(corpus_id)
+    if actuelle is None:
+        raise CorpusInconnu(f"Corpus inconnu : {corpus_id!r}.")
+
+    mise_a_jour = actuelle.model_copy(update=champs)
+    registre[corpus_id] = mise_a_jour
+    ecrire_registre_corpus(registre)
+    return mise_a_jour
+
+
+def supprimer_corpus_config(corpus_id: str) -> None:
+    """
+    Retire l'entrée `corpus_id` du registre (`config/corpus.yaml`).
+
+    Ne touche à rien d'autre : ni la collection Qdrant, ni le registre de
+    fichiers, ni un profil de domaine persisté — orchestré par
+    `src.rag.corpus.supprimer_corpus`, qui appelle cette fonction en
+    dernier, une fois le reste du périmètre du corpus effectivement
+    nettoyé. Lève `CorpusInconnu` si `corpus_id` n'est pas déclaré.
+    """
+    corpus_id = valider_corpus_id(corpus_id)
+    registre = dict(get_registre_corpus())
+    if corpus_id not in registre:
+        raise CorpusInconnu(f"Corpus inconnu : {corpus_id!r}.")
+    del registre[corpus_id]
+    ecrire_registre_corpus(registre)
+
+
 def recharger_config() -> None:
     """Vide les caches. Utile en dev et pour basculer de profil à chaud."""
     get_settings.cache_clear()
     get_config_technique.cache_clear()
     get_profil.cache_clear()
+    get_registre_corpus.cache_clear()
 
 
 # ===========================================================================

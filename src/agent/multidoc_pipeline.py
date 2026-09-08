@@ -52,7 +52,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
-from src.config import get_profil, get_settings
+from src.config import get_settings
 from src.llm.common import bloc_profil_domaine, extraire_json_objet, invoquer_llm
 from src.rag.retrieval import (
     CollectionIndisponible,
@@ -237,12 +237,15 @@ class MapDocument:
 # --------------------------------------------------------------------------
 
 
-def resoudre_cibles(references: Sequence[str]) -> ResolutionCibles:
+def resoudre_cibles(
+    references: Sequence[str], corpus_id: str = "default"
+) -> ResolutionCibles:
     """
     Résout des références de fichiers explicites (issues du signal P1.4) en
-    documents indexés. N'accepte que 2 à `LIMITE_DOCUMENTS` documents
-    distincts et fiables — sinon abstention déterministe, jamais de repli
-    silencieux vers un search global.
+    documents indexés DANS LE CORPUS `corpus_id` — jamais dans un autre.
+    N'accepte que 2 à `LIMITE_DOCUMENTS` documents distincts et fiables —
+    sinon abstention déterministe, jamais de repli silencieux vers un
+    search global.
     """
     brutes: list[str] = []
     for ref in references:
@@ -271,7 +274,7 @@ def resoudre_cibles(references: Sequence[str]) -> ResolutionCibles:
         )
 
     try:
-        cat = catalogue(profil=get_profil())
+        cat = catalogue(corpus_id=corpus_id)
     except Exception as exc:  # noqa: BLE001 — le catalogue ne doit pas casser le graphe
         return ResolutionCibles(
             refus=f"Catalogue documentaire indisponible : {exc}",
@@ -731,16 +734,19 @@ def map_document(
     *,
     llm: Any,
     profil_domaine: Any | None = None,
+    corpus_id: str = "default",
 ) -> MapDocument:
     """
     MAP d'UN document : couverture INTÉGRALE (tous les chunks, en ordre),
     partitionnée en lots bornés, un appel LLM structuré par lot, puis fusion
     déterministe (pas d'appel LLM). Ne voit jamais un autre document, ni la
-    question multi-document brute — seulement les axes du `task_spec`.
+    question multi-document brute — seulement les axes du `task_spec`. Ne
+    voit jamais non plus un autre corpus : `cible.doc_id` est chargé
+    exclusivement depuis la collection de `corpus_id`.
     Provenance (citations, pages) conservée pour l'ensemble du document.
     """
     try:
-        passages = charger_document(cible.doc_id)
+        passages = charger_document(cible.doc_id, corpus_id=corpus_id)
     except DocumentInconnu:
         return MapDocument(cible=cible, sans_evidence=True, texte="(document absent ou vide)")
     except (CollectionIndisponible, ErreurRecherche) as exc:
@@ -882,17 +888,22 @@ def executer_maps(
     llm: Any,
     profil_domaine: Any | None = None,
     operation: Literal["compare", "synthesize"] = "compare",
+    corpus_id: str = "default",
 ) -> list[MapDocument]:
     """
     PLAN (un appel borné, transparent pour l'appelant) puis MAP structuré par
     document. Signature INCHANGÉE pour `question` (chaîne libre) : c'est
     cette fonction, et elle seule, qui la transforme en `TaskSpec` avant de
     l'envoyer à un quelconque MAP — `src.tools.compare` / `synthesize`
-    n'ont besoin de rien connaître du PLAN.
+    n'ont besoin de rien connaître du PLAN. Chaque MAP reste scopé à
+    `corpus_id` : les `cibles` doivent avoir été résolues dans ce même
+    corpus (voir `resoudre_cibles`).
     """
     task_spec = planifier(operation, question, cibles, llm=llm)
     return [
-        map_document(cible, task_spec, llm=llm, profil_domaine=profil_domaine)
+        map_document(
+            cible, task_spec, llm=llm, profil_domaine=profil_domaine, corpus_id=corpus_id
+        )
         for cible in cibles
     ]
 

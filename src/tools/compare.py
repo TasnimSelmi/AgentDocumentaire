@@ -114,15 +114,17 @@ def comparer(
     *,
     llm: Any,
     profil_domaine: Any | None = None,
+    corpus_id: str = "default",
 ) -> ResultatOutil:
     """
     Point d'entrée COMPARE. `references` = noms de fichiers explicites du
-    signal multi-document (P1.4). Abstention déterministe si la résolution
-    n'est pas fiable — jamais de repli vers un search global.
+    signal multi-document (P1.4), résolus DANS LE CORPUS `corpus_id`
+    uniquement. Abstention déterministe si la résolution n'est pas fiable —
+    jamais de repli vers un search global, jamais un mélange de corpus.
     """
     question = " ".join(str(question).split())
 
-    resolution = resoudre_cibles(references)
+    resolution = resoudre_cibles(references, corpus_id=corpus_id)
     if resolution.refus is not None:
         return ResultatOutil.echec(_OUTIL, resolution.refus, motif=resolution.motif)
 
@@ -130,7 +132,11 @@ def comparer(
         return ResultatOutil.echec(_OUTIL, "Aucun LLM disponible pour la comparaison.")
 
     maps = executer_maps(
-        resolution.documents, question, llm=llm, profil_domaine=profil_domaine
+        resolution.documents,
+        question,
+        llm=llm,
+        profil_domaine=profil_domaine,
+        corpus_id=corpus_id,
     )
     utilisables, sans_evidence, echecs = diagnostic_maps(maps)
 

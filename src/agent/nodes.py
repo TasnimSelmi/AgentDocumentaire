@@ -701,7 +701,7 @@ def router_intention(etat: EtatGraphe) -> str:
     return "rechercher"
 
 
-def _resoudre_perimetre_document(requete: str) -> tuple[Any, str]:
+def _resoudre_perimetre_document(requete: str, corpus_id: str = "default") -> tuple[Any, str]:
     """
     Résolution documentaire partagée par `noeud_summarize` et
     `noeud_classify` : texte libre -> `PerimetreDocumentaire`, via
@@ -720,7 +720,7 @@ def _resoudre_perimetre_document(requete: str) -> tuple[Any, str]:
         ``"aucun"``).
     """
     try:
-        perimetre = resoudre_document(requete)
+        perimetre = resoudre_document(requete, corpus_id=corpus_id)
         return perimetre, perimetre.statut
     except Exception as exc:  # noqa: BLE001 — la résolution ne doit jamais casser le graphe
         logger.warning("Résolution documentaire impossible : %s", exc)
@@ -760,7 +760,9 @@ def noeud_summarize(etat: EtatGraphe) -> dict:
     session = etat.session
     requete = session.etat.requete_courante
 
-    perimetre, statut_resolution = _resoudre_perimetre_document(requete)
+    perimetre, statut_resolution = _resoudre_perimetre_document(
+        requete, corpus_id=session.contexte.corpus_id
+    )
     document: str | None = None
     if (
         perimetre is not None
@@ -892,7 +894,9 @@ def noeud_classify(etat: EtatGraphe) -> dict:
     requete = session.etat.requete_courante
     categories = get_profil().classification.noms()
 
-    perimetre, statut_resolution = _resoudre_perimetre_document(requete)
+    perimetre, statut_resolution = _resoudre_perimetre_document(
+        requete, corpus_id=session.contexte.corpus_id
+    )
     document: str | None = None
     if (
         perimetre is not None
@@ -983,7 +987,9 @@ def noeud_extract(etat: EtatGraphe) -> dict:
 
     champs = _parser_champs_extraction(session.llm, requete)
 
-    perimetre, statut_resolution = _resoudre_perimetre_document(requete)
+    perimetre, statut_resolution = _resoudre_perimetre_document(
+        requete, corpus_id=session.contexte.corpus_id
+    )
     document: str | None = None
     if (
         perimetre is not None
@@ -1069,6 +1075,7 @@ def noeud_compare(etat: EtatGraphe) -> dict:
         getattr(signal, "references_detectees", ()),
         llm=session.llm,
         profil_domaine=session.contexte.profil_domaine,
+        corpus_id=session.contexte.corpus_id,
     )
     session.contexte.ajouter_resultat(resultat)
 
@@ -1108,6 +1115,7 @@ def noeud_synthesize(etat: EtatGraphe) -> dict:
         getattr(signal, "references_detectees", ()),
         llm=session.llm,
         profil_domaine=session.contexte.profil_domaine,
+        corpus_id=session.contexte.corpus_id,
     )
     session.contexte.ajouter_resultat(resultat)
 

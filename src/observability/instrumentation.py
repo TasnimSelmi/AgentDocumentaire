@@ -72,7 +72,7 @@ _ERR_CATEGORIE_HTTP = "http_unhandled"
 # Protocoles des services enveloppés (structurels — aucun import dur).
 # ---------------------------------------------------------------------------
 class _AgentServiceLike(Protocol):
-    def query(self, requete: str) -> Any: ...
+    def query(self, requete: str, *, corpus_id: str | None = ...) -> Any: ...
 
 
 class _IngestionServiceLike(Protocol):
@@ -84,6 +84,7 @@ class _IngestionServiceLike(Protocol):
         limite: int | None = ...,
         inferer: bool = ...,
         nom_profil: str | None = ...,
+        corpus_id: str | None = ...,
     ) -> Any: ...
 
 
@@ -209,7 +210,7 @@ class InstrumentedAgentService:
         """Service enveloppé — introspection (tests, intégration)."""
         return self._inner
 
-    def query(self, requete: str) -> Any:
+    def query(self, requete: str, *, corpus_id: str | None = None) -> Any:
         with portee_correlation() as ids:
             debut = _maintenant()
             horloge = time.perf_counter()
@@ -218,7 +219,7 @@ class InstrumentedAgentService:
                 _emettre(self._sink, _event_started(AGENT_EXECUTION_STARTED, ids, debut))
 
             try:
-                reponse = self._inner.query(requete)
+                reponse = self._inner.query(requete, corpus_id=corpus_id)
             except Exception as exc:  # noqa: BLE001 — on trace puis on relève
                 _emettre(
                     self._sink,
@@ -275,6 +276,7 @@ class InstrumentedIngestionService:
         limite: int | None = None,
         inferer: bool = True,
         nom_profil: str | None = None,
+        corpus_id: str | None = None,
     ) -> Any:
         with portee_correlation() as ids:
             debut = _maintenant()
@@ -290,6 +292,7 @@ class InstrumentedIngestionService:
                     limite=limite,
                     inferer=inferer,
                     nom_profil=nom_profil,
+                    corpus_id=corpus_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 est_source = (

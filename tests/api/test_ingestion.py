@@ -97,7 +97,7 @@ def test_ingestion_erreur_source_est_503_sans_fuite(build_client):
 
 
 def test_ingestion_erreur_source_depuis_la_fabrique_est_503(build_client):
-    def fabrique_qui_leve():
+    def fabrique_qui_leve(corpus_id):
         raise ErreurSource("montage distant indisponible : //nas/share")
 
     reponse = build_client(sources={"local": fabrique_qui_leve}).post(

@@ -283,12 +283,14 @@ def _executer_search(
             criteres[cle] = valeur.model_dump(exclude_none=True)
 
     profil = get_profil()
+    corpus_id = contexte.corpus_id if contexte is not None else "default"
 
     try:
         rapport = rechercher_passages(
             requete=requete,
             criteres=criteres or None,
             profil=profil,
+            corpus_id=corpus_id,
         )
 
     except FiltreInvalide as exc:

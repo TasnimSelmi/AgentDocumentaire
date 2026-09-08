@@ -53,6 +53,12 @@ class ChunkIndexable:
     dense: list[float]
     sparse: VecteurSparse
     payload: dict[str, Any] = field(default_factory=dict)
+    #: Défense en profondeur (audit multi-corpus) : toujours écrit dans le
+    #: payload même si la collection elle-même isole déjà le corpus, pour
+    #: l'audit, la traçabilité et une éventuelle migration future vers une
+    #: collection partagée. Défaut "default" : compatible avec tout appelant
+    #: existant qui ne connaît pas encore le multi-corpus.
+    corpus_id: str = "default"
 
     def point_id(self) -> str:
         return str(uuid.uuid5(_NAMESPACE, f"{self.doc_id}:{self.chunk_index}"))
@@ -160,6 +166,9 @@ def _assurer_indexes_payload(
         ("nom_fichier", models.PayloadSchemaType.KEYWORD),
         ("categorie", models.PayloadSchemaType.KEYWORD),
         ("source", models.PayloadSchemaType.KEYWORD),
+        # Défense en profondeur multi-corpus (peu coûteux, utile à l'audit
+        # même quand l'isolation principale vient déjà de la collection).
+        ("corpus_id", models.PayloadSchemaType.KEYWORD),
         # Nécessaires à l'expansion du contexte (parent et voisins).
         ("chunk_index", models.PayloadSchemaType.INTEGER),
         ("parent_id", models.PayloadSchemaType.KEYWORD),
@@ -183,18 +192,30 @@ def _assurer_indexes_payload(
         logger.debug("Index payload créé : %s (%s)", nom_champ, schema)
 
 
-def creer_collection(reinitialiser: bool = False, profil: Profil | None = None) -> None:
+def creer_collection(
+    reinitialiser: bool = False,
+    profil: Profil | None = None,
+    *,
+    nom_collection: str | None = None,
+) -> None:
     """
     Crée la collection si absente et garantit ses index de payload.
 
     Les index sont indispensables : sans eux, un filtre sur un corpus
     volumineux force un parcours complet et dégrade fortement la latence.
     Les index manquants sont aussi ajoutés à une collection déjà existante.
+
+    `nom_collection` : frontière d'isolation multi-corpus. Omis, la
+    collection historiquement configurée (`qdrant.nom_collection`) est
+    utilisée — comportement inchangé pour tout appelant existant. Fourni
+    (toujours dérivé côté serveur par `src.rag.corpus`, jamais choisi par un
+    client), seule CETTE collection est créée/réinitialisée : les autres
+    corpus ne sont jamais affectés.
     """
     client = get_client()
     cfg = get_config_technique().qdrant
     profil = profil or get_profil()
-    nom = cfg.nom_collection
+    nom = nom_collection or cfg.nom_collection
 
     if reinitialiser and client.collection_exists(nom):
         client.delete_collection(nom)
@@ -220,9 +241,23 @@ def creer_collection(reinitialiser: bool = False, profil: Profil | None = None) 
     _assurer_indexes_payload(client, nom, profil)
 
 
-def info_collection() -> dict[str, Any]:
+def supprimer_collection(*, nom_collection: str | None = None) -> None:
+    """
+    Supprime la collection si elle existe — jamais recréée (à la différence
+    de `creer_collection(reinitialiser=True)`). Idempotent : aucune erreur
+    si la collection n'existe déjà pas. `nom_collection` : toujours dérivé
+    côté serveur par `src.rag.corpus`, jamais fourni par un client.
+    """
     client = get_client()
-    nom = get_config_technique().qdrant.nom_collection
+    nom = nom_collection or get_config_technique().qdrant.nom_collection
+    if client.collection_exists(nom):
+        client.delete_collection(nom)
+        logger.info("Collection '%s' supprimée.", nom)
+
+
+def info_collection(*, nom_collection: str | None = None) -> dict[str, Any]:
+    client = get_client()
+    nom = nom_collection or get_config_technique().qdrant.nom_collection
     if not client.collection_exists(nom):
         return {"existe": False, "nom": nom}
 
@@ -239,16 +274,21 @@ def info_collection() -> dict[str, Any]:
 # Écriture
 # ===========================================================================
 
-def indexer(chunks: list[ChunkIndexable]) -> int:
+def indexer(chunks: list[ChunkIndexable], *, nom_collection: str | None = None) -> int:
     """
     Écrit les chunks par lots. L'upsert écrase les points de même
     identifiant : réindexer un fichier modifié ne crée pas de doublons.
+
+    `nom_collection` omis -> collection historiquement configurée (défaut
+    du corpus « default »), sinon la collection dérivée par
+    `src.rag.corpus` pour le corpus courant : jamais d'écriture croisée.
     """
     if not chunks:
         return 0
 
     client = get_client()
     cfg = get_config_technique().qdrant
+    nom = nom_collection or cfg.nom_collection
     taille_lot = cfg.taille_lot_upsert
     total = 0
 
@@ -270,6 +310,7 @@ def indexer(chunks: list[ChunkIndexable]) -> int:
                     "doc_id": chunk.doc_id,
                     "chunk_index": chunk.chunk_index,
                     "texte": chunk.texte,
+                    "corpus_id": chunk.corpus_id,
                 }
             )
 
@@ -277,7 +318,7 @@ def indexer(chunks: list[ChunkIndexable]) -> int:
                 models.PointStruct(id=chunk.point_id(), vector=vecteurs, payload=payload)
             )
 
-        client.upsert(collection_name=cfg.nom_collection, points=points, wait=True)
+        client.upsert(collection_name=nom, points=points, wait=True)
         total += len(points)
 
     return total
@@ -289,6 +330,7 @@ def recuperer_contexte(
     parent_id: str | None = None,
     indices: Sequence[int] | None = None,
     limite: int = 50,
+    nom_collection: str | None = None,
 ) -> list[Resultat]:
     """
     Récupère les chunks voisins d'un chunk déjà trouvé.
@@ -322,14 +364,21 @@ def recuperer_contexte(
             )
         )
 
-    return parcourir(models.Filter(must=conditions), limite=limite)
+    return parcourir(models.Filter(must=conditions), limite=limite, nom_collection=nom_collection)
 
 
-def supprimer_document(doc_id: str) -> None:
-    """Retire tous les chunks d'un document. Appelé avant réindexation."""
+def supprimer_document(doc_id: str, *, nom_collection: str | None = None) -> None:
+    """Retire tous les chunks d'un document. Appelé avant réindexation.
+
+    `nom_collection` omis -> collection du corpus « default ». Fournie
+    (toujours dérivée par `src.rag.corpus`), la suppression ne peut
+    atteindre que CETTE collection — un doc_id du corpus A ne peut jamais
+    faire supprimer un point du corpus B, qui vit dans une collection
+    distincte."""
     client = get_client()
+    nom = nom_collection or get_config_technique().qdrant.nom_collection
     client.delete(
-        collection_name=get_config_technique().qdrant.nom_collection,
+        collection_name=nom,
         points_selector=models.FilterSelector(
             filter=models.Filter(
                 must=[models.FieldCondition(key="doc_id", match=models.MatchValue(value=doc_id))]
@@ -404,6 +453,8 @@ def rechercher(
     sparse: VecteurSparse | None = None,
     filtre: models.Filter | None = None,
     limite: int | None = None,
+    *,
+    nom_collection: str | None = None,
 ) -> list[Resultat]:
     """
     Recherche hybride : deux pré-requêtes (dense et sparse) fusionnées
@@ -415,10 +466,13 @@ def rechercher(
 
     Bascule automatiquement en dense seul si le sparse est absent ou
     désactivé.
+
+    `nom_collection` : frontière d'isolation multi-corpus (voir
+    `src.rag.corpus`). Omis -> collection du corpus « default ».
     """
     client = get_client()
     cfg = get_config_technique()
-    nom = cfg.qdrant.nom_collection
+    nom = nom_collection or cfg.qdrant.nom_collection
     limite = limite or cfg.recherche.top_k_final
 
     hybride = (
@@ -467,6 +521,8 @@ def rechercher(
 def parcourir(
     filtre: models.Filter | None = None,
     limite: int = 100,
+    *,
+    nom_collection: str | None = None,
 ) -> list[Resultat]:
     """
     Récupère des points par filtre seul, sans vecteur.
@@ -474,8 +530,9 @@ def parcourir(
     un tableau de bord.
     """
     client = get_client()
-    points, _ = get_client().scroll(
-        collection_name=get_config_technique().qdrant.nom_collection,
+    nom = nom_collection or get_config_technique().qdrant.nom_collection
+    points, _ = client.scroll(
+        collection_name=nom,
         scroll_filter=filtre,
         limit=limite,
         with_payload=True,
@@ -499,6 +556,8 @@ _CHAMPS_IDENTITE_MINIMAUX = ("doc_id", "nom_fichier", "source")
 def lister_documents(
     champs: Sequence[str] | None = None,
     limite: int = 20_000,
+    *,
+    nom_collection: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Renvoie l'identité des documents distincts présents dans la collection.
@@ -520,8 +579,8 @@ def lister_documents(
         raise ValueError("limite doit être supérieure ou égale à 1.")
 
     client = get_client()
-    nom_collection = get_config_technique().qdrant.nom_collection
-    if not client.collection_exists(nom_collection):
+    nom = nom_collection or get_config_technique().qdrant.nom_collection
+    if not client.collection_exists(nom):
         return []
 
     documents: dict[str, dict[str, Any]] = {}
@@ -530,7 +589,7 @@ def lister_documents(
     while len(documents) < limite:
         taille_page = min(1024, limite - len(documents))
         points, decalage = client.scroll(
-            collection_name=nom_collection,
+            collection_name=nom,
             limit=taille_page,
             offset=decalage,
             with_payload=demandes,
@@ -565,6 +624,7 @@ def parcourir_tout(
     filtre: models.Filter | None,
     *,
     taille_page: int = 1024,
+    nom_collection: str | None = None,
 ) -> list[Resultat]:
     """
     Récupère TOUS les points correspondant à un filtre, sans vecteur.
@@ -580,14 +640,14 @@ def parcourir_tout(
         raise ValueError("taille_page doit être supérieure ou égale à 1.")
 
     client = get_client()
-    nom_collection = get_config_technique().qdrant.nom_collection
+    nom = nom_collection or get_config_technique().qdrant.nom_collection
 
     resultats: list[Resultat] = []
     decalage: Any = None
 
     while True:
         points, decalage = client.scroll(
-            collection_name=nom_collection,
+            collection_name=nom,
             scroll_filter=filtre,
             limit=taille_page,
             offset=decalage,
@@ -609,10 +669,11 @@ def parcourir_tout(
     return resultats
 
 
-def compter(filtre: models.Filter | None = None) -> int:
+def compter(filtre: models.Filter | None = None, *, nom_collection: str | None = None) -> int:
     client = get_client()
+    nom = nom_collection or get_config_technique().qdrant.nom_collection
     return client.count(
-        collection_name=get_config_technique().qdrant.nom_collection,
+        collection_name=nom,
         count_filter=filtre,
         exact=True,
     ).count

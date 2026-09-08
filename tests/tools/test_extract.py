@@ -77,12 +77,17 @@ class _FauxCatalogue:
 
 
 def _resoudre_vers(monkeypatch, doc_id: str, passages: list[Passage]) -> None:
-    monkeypatch.setattr(extract, "get_profil", lambda: None)
-    monkeypatch.setattr(extract, "catalogue", lambda profil=None: _FauxCatalogue(_perimetre_exact(doc_id)))
+    monkeypatch.setattr(
+        extract,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(_perimetre_exact(doc_id)),
+    )
     monkeypatch.setattr(
         extract,
         "charger_document",
-        lambda cible: passages if cible == doc_id else (_ for _ in ()).throw(DocumentInconnu(cible)),
+        lambda cible, corpus_id=None: passages
+        if cible == doc_id
+        else (_ for _ in ()).throw(DocumentInconnu(cible)),
     )
 
 
@@ -344,8 +349,11 @@ def test_erreur_llm_cas_b_resultat_vide_trace():
 
 
 def test_document_inconnu_echec_propre(monkeypatch):
-    monkeypatch.setattr(extract, "get_profil", lambda: None)
-    monkeypatch.setattr(extract, "catalogue", lambda profil=None: _FauxCatalogue(DocumentInconnu("Z introuvable")))
+    monkeypatch.setattr(
+        extract,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(DocumentInconnu("Z introuvable")),
+    )
 
     resultat = _executer_a(_contexte_a(LLMExtractions([])), champs=["montant"], documents=("Z",))
 
@@ -359,9 +367,10 @@ def test_document_inconnu_echec_propre(monkeypatch):
 
 
 def test_document_ambigu_echec_propre(monkeypatch):
-    monkeypatch.setattr(extract, "get_profil", lambda: None)
     monkeypatch.setattr(
-        extract, "catalogue", lambda profil=None: _FauxCatalogue(_perimetre_compatible(("A", "B")))
+        extract,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(_perimetre_compatible(("A", "B"))),
     )
 
     resultat = _executer_a(_contexte_a(LLMExtractions([])), champs=["montant"], documents=("A et B",))
@@ -395,10 +404,15 @@ def test_document_resolu_sans_contenu_echec_propre(monkeypatch):
 
 
 def test_collection_indisponible_echec_propre(monkeypatch):
-    monkeypatch.setattr(extract, "get_profil", lambda: None)
-    monkeypatch.setattr(extract, "catalogue", lambda profil=None: _FauxCatalogue(_perimetre_exact("A")))
     monkeypatch.setattr(
-        extract, "charger_document", lambda cible: (_ for _ in ()).throw(CollectionIndisponible("absente"))
+        extract,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(_perimetre_exact("A")),
+    )
+    monkeypatch.setattr(
+        extract,
+        "charger_document",
+        lambda cible, corpus_id=None: (_ for _ in ()).throw(CollectionIndisponible("absente")),
     )
 
     resultat = _executer_a(_contexte_a(LLMExtractions([])), champs=["montant"])

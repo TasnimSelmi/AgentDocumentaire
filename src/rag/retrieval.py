@@ -49,7 +49,10 @@ import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable, Sequence
 
+from functools import partial
+
 from src.config import Champ, Profil, get_config_technique, get_profil, get_settings
+from src.rag.corpus import CORPUS_DEFAUT, ContexteCorpus, resoudre_corpus
 from src.rag.embeddings import encoder_requete, reranker
 from src.rag.normalization import normaliser_booleen, normaliser_entier, normaliser_valeur
 from src.rag.vectorstore import (
@@ -614,7 +617,11 @@ _INDICE_IDENTIFIANT = re.compile(r"[_\-/]|\.[A-Za-z0-9]{1,5}\Z|\d")
 # la qualifie (« 2021 annual financial statements »).
 _PORTEE_ANNEE = 3
 
-_catalogue: CatalogueDocuments | None = None
+#: Cache du catalogue documentaire, désormais tenu PAR CORPUS (isolation
+#: multi-corpus) : un catalogue construit pour "finance" ne doit jamais
+#: être réutilisé pour "rh", même si les deux appels omettent `corpus_id`
+#: par erreur — dictionnaire, jamais un singleton unique.
+_catalogues: dict[str, CatalogueDocuments] = {}
 
 
 def _normaliser_texte(texte: Any) -> str:
@@ -1228,8 +1235,14 @@ class CatalogueDocuments:
         return len(jeton) >= 6 and jeton in requete
 
 
-def _documents_depuis_vectorstore(profil: Profil | None = None) -> list[FicheDocument]:
-    """Lit l'identité des documents distincts depuis la collection."""
+def _documents_depuis_vectorstore(
+    profil: Profil | None = None,
+    *,
+    nom_collection: str | None = None,
+) -> list[FicheDocument]:
+    """Lit l'identité des documents distincts depuis LA collection du corpus
+    courant (`nom_collection`, dérivée par `src.rag.corpus` — jamais celle
+    d'un autre corpus)."""
     if _lister_documents is None:
         logger.warning(
             "vectorstore.lister_documents() est absent : la résolution "
@@ -1238,7 +1251,7 @@ def _documents_depuis_vectorstore(profil: Profil | None = None) -> list[FicheDoc
         return []
 
     try:
-        entrees = _lister_documents(champs=cles_catalogue(profil))
+        entrees = _lister_documents(champs=cles_catalogue(profil), nom_collection=nom_collection)
     except TypeError:
         # Signature plus ancienne, sans sélection de champs.
         entrees = _lister_documents()
@@ -1260,27 +1273,51 @@ def _documents_depuis_vectorstore(profil: Profil | None = None) -> list[FicheDoc
     return fiches
 
 
-def catalogue(*, forcer: bool = False, profil: Profil | None = None) -> CatalogueDocuments:
-    """Renvoie le catalogue documentaire, construit une seule fois."""
-    global _catalogue
-    if _catalogue is None or forcer:
-        _catalogue = CatalogueDocuments.construire(_documents_depuis_vectorstore(profil))
-        logger.debug(
-            "Catalogue documentaire construit : %d document(s).",
-            len(_catalogue.fiches),
+def catalogue(
+    *,
+    forcer: bool = False,
+    profil: Profil | None = None,
+    corpus_id: str = CORPUS_DEFAUT,
+) -> CatalogueDocuments:
+    """
+    Renvoie le catalogue documentaire du corpus `corpus_id`, construit une
+    seule fois PAR CORPUS.
+
+    `profil` omis -> profil déclaré pour ce corpus (`config/corpus.yaml`,
+    lui-même replié sur `Settings.active_profile` pour le corpus « default »
+    — comportement historique inchangé). Le catalogue d'un corpus n'est
+    jamais construit depuis la collection d'un autre.
+    """
+    contexte_corpus: ContexteCorpus = resoudre_corpus(corpus_id)
+    profil = profil or contexte_corpus.profil
+
+    if corpus_id not in _catalogues or forcer:
+        _catalogues[corpus_id] = CatalogueDocuments.construire(
+            _documents_depuis_vectorstore(profil, nom_collection=contexte_corpus.nom_collection)
         )
-    return _catalogue
+        logger.debug(
+            "Catalogue documentaire construit pour le corpus « %s » : %d document(s).",
+            corpus_id,
+            len(_catalogues[corpus_id].fiches),
+        )
+    return _catalogues[corpus_id]
 
 
-def reinitialiser_catalogue() -> None:
-    """Invalide le cache du catalogue, à appeler après une ingestion."""
-    global _catalogue
-    _catalogue = None
+def reinitialiser_catalogue(corpus_id: str | None = None) -> None:
+    """Invalide le cache du catalogue, à appeler après une ingestion.
+
+    `corpus_id` omis -> invalide le cache de TOUS les corpus (utile pour les
+    tests) ; fourni, invalide uniquement celui de ce corpus, sans affecter
+    les autres."""
+    if corpus_id is None:
+        _catalogues.clear()
+    else:
+        _catalogues.pop(corpus_id, None)
 
 
-def resoudre_document(requete: str) -> PerimetreDocumentaire:
+def resoudre_document(requete: str, *, corpus_id: str = CORPUS_DEFAUT) -> PerimetreDocumentaire:
     """Point d'entrée public de la résolution, réutilisable par l'agent."""
-    return catalogue().resoudre(requete)
+    return catalogue(corpus_id=corpus_id).resoudre(requete)
 
 
 def identite_document(payload: dict[str, Any]) -> dict[str, str]:
@@ -1424,41 +1461,48 @@ def _trier_par_ordre_documentaire(
     return avec_index + sans_index
 
 
-def charger_document(doc_id: str) -> list[Passage]:
+def charger_document(doc_id: str, *, corpus_id: str = CORPUS_DEFAUT) -> list[Passage]:
     """
-    Charge l'intégralité des chunks d'un document déjà indexé.
+    Charge l'intégralité des chunks d'un document déjà indexé DANS LE
+    CORPUS `corpus_id`.
 
     Primitive de lecture documentaire, distincte de ``rechercher_passages`` :
     aucune recherche sémantique, aucun reranking, aucune dépendance à une
     requête utilisateur. Elle lit exhaustivement (pagination Qdrant complète
     via ``vectorstore.parcourir_tout``) tous les points portant ce ``doc_id``
-    exact, puis les restitue dans leur ordre documentaire d'origine (voir
-    ``_trier_par_ordre_documentaire``).
+    exact DANS LA COLLECTION DE CE CORPUS, puis les restitue dans leur ordre
+    documentaire d'origine (voir ``_trier_par_ordre_documentaire``). Un
+    ``doc_id`` d'un autre corpus est structurellement invisible : la
+    recherche porte sur une collection distincte.
 
     ``doc_id`` doit être l'identifiant stable déjà connu (par exemple obtenu
-    via ``catalogue().par_identifiant(...)``), pas un nom approximatif :
-    cette fonction ne fait aucune résolution floue — cela reste le rôle de
-    ``CatalogueDocuments``, volontairement non dupliqué ici.
+    via ``catalogue(corpus_id=...).par_identifiant(...)``), pas un nom
+    approximatif : cette fonction ne fait aucune résolution floue — cela
+    reste le rôle de ``CatalogueDocuments``, volontairement non dupliqué ici.
 
     Lève :
         - ``CollectionIndisponible`` si la collection Qdrant n'existe pas ;
         - ``DocumentInconnu`` si aucun chunk ne porte ce ``doc_id`` — que le
-          document n'ait jamais existé ou qu'il ait été retiré de l'index
-          (``vectorstore.supprimer_document``) ; les deux cas sont
-          indiscernables du point de vue de cette primitive et traités de
-          façon identique.
+          document n'ait jamais existé, qu'il ait été retiré de l'index
+          (``vectorstore.supprimer_document``), ou qu'il appartienne à un
+          autre corpus ; les trois cas sont indiscernables du point de vue
+          de cette primitive et traités de façon identique.
     """
     doc_id = str(doc_id).strip()
     if not doc_id:
         raise DocumentInconnu("doc_id vide.")
 
-    infos = info_collection()
+    contexte_corpus = resoudre_corpus(corpus_id)
+    infos = info_collection(nom_collection=contexte_corpus.nom_collection)
     if not infos.get("existe"):
         raise CollectionIndisponible(
             "La collection Qdrant n'existe pas. Lance d'abord l'ingestion."
         )
 
-    resultats = parcourir_tout(construire_filtre({"doc_id": doc_id}))
+    resultats = parcourir_tout(
+        construire_filtre({"doc_id": doc_id}),
+        nom_collection=contexte_corpus.nom_collection,
+    )
     if not resultats:
         raise DocumentInconnu(f"Document inconnu dans la collection : {doc_id!r}.")
 
@@ -1642,9 +1686,11 @@ def rechercher_passages(
     max_par_document: int = 3,
     documents: str | Sequence[str] | None = None,
     resolution_document: bool = True,
+    corpus_id: str = CORPUS_DEFAUT,
 ) -> RapportRecherche:
     """
-    Exécute la récupération complète d'un RAG.
+    Exécute la récupération complète d'un RAG, strictement scopée au corpus
+    `corpus_id`.
 
     Le seuil de pertinence est appliqué uniquement au score du reranker,
     normalisé entre 0 et 1. Il n'est pas appliqué au score RRF de Qdrant,
@@ -1656,7 +1702,8 @@ def rechercher_passages(
           documents du catalogue, la recherche Qdrant y est restreinte et la
           diversification est désactivée pour un document unique ;
         - une résolution ambiguë ne pose aucun filtre : la recherche reste
-          globale, car un filtre erroné masquerait la bonne réponse ;
+          globale (au sein du corpus `corpus_id` — jamais tous corpus
+          confondus), car un filtre erroné masquerait la bonne réponse ;
         - si la recherche cloisonnée ne renvoie rien, le rapport est vide et
           porte un ``motif_absence``. Aucune reprise sans filtre n'est
           tentée : répondre depuis un autre document serait factuellement
@@ -1669,11 +1716,13 @@ def rechercher_passages(
     if max_par_document < 1:
         raise ValueError("max_par_document doit être supérieur ou égal à 1.")
 
-    profil = profil or get_profil()
+    contexte_corpus: ContexteCorpus = resoudre_corpus(corpus_id)
+    nom_collection = contexte_corpus.nom_collection
+    profil = profil or contexte_corpus.profil
     cfg = get_config_technique()
     settings = get_settings()
 
-    infos = info_collection()
+    infos = info_collection(nom_collection=nom_collection)
     if not infos.get("existe"):
         raise CollectionIndisponible(
             "La collection Qdrant n'existe pas. Lance d'abord l'ingestion."
@@ -1694,12 +1743,12 @@ def rechercher_passages(
 
     if documents:
         demandes = [documents] if isinstance(documents, str) else list(documents)
-        perimetre = catalogue(profil=profil).perimetre_explicite(demandes)
+        perimetre = catalogue(profil=profil, corpus_id=corpus_id).perimetre_explicite(demandes)
     elif valeurs_imposees:
         # L'appelant a déjà cloisonné : on respecte son choix sans le rejouer.
         perimetre = _perimetre_depuis_filtres(champ_impose, valeurs_imposees)
     elif resolution_document:
-        perimetre = catalogue(profil=profil).resoudre(requete)
+        perimetre = catalogue(profil=profil, corpus_id=corpus_id).resoudre(requete)
     else:
         perimetre = PerimetreDocumentaire(statut="aucun", raison="resolution_desactivee")
 
@@ -1768,6 +1817,7 @@ def rechercher_passages(
         sparse=sparse if cfg.qdrant.sparse_active else None,
         filtre=filtre_qdrant,
         limite=candidats_voulus,
+        nom_collection=nom_collection,
     )
 
     # --- Repli sûr ---------------------------------------------------------
@@ -1833,6 +1883,7 @@ def rechercher_passages(
             rayon=cfg_voisins.rayon,
             max_chunks_ajoutes=cfg_voisins.max_chunks_ajoutes,
             taille_max_contexte=cfg_voisins.taille_max_contexte,
+            recuperer=partial(recuperer_contexte, nom_collection=nom_collection),
         )
         if perimetre.contraignant:
             # Un voisin reste soumis au cloisonnement documentaire.

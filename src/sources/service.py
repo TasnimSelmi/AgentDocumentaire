@@ -53,14 +53,19 @@ class IngestionService:
         limite: int | None = None,
         inferer: bool = True,
         nom_profil: str | None = None,
+        corpus_id: str | None = None,
     ) -> RapportIngestion:
         """
-        Synchronise le contenu de `source` vers l'index.
+        Synchronise le contenu de `source` vers l'index du corpus `corpus_id`.
 
         La source matérialise ses documents dans un répertoire, puis le
         pipeline gelé est exécuté sur ce répertoire. Les options
-        (`reinitialiser`, `limite`, `inferer`, `nom_profil`) sont transmises
-        telles quelles à `ingerer` — mêmes valeurs par défaut, même sémantique.
+        (`reinitialiser`, `limite`, `inferer`, `nom_profil`, `corpus_id`)
+        sont transmises telles quelles à `ingerer` — mêmes valeurs par
+        défaut, même sémantique. `corpus_id` omis -> corpus « default »,
+        comportement inchangé pour tout appelant existant ; `reinitialiser`
+        ne détruit alors que la collection et le registre de CE corpus,
+        jamais ceux d'un autre.
 
         Sûreté : le pipeline n'est appelé qu'à l'**intérieur** du bloc
         `with source.materialiser()`. Si la source ne peut pas produire un
@@ -74,6 +79,7 @@ class IngestionService:
             "limite": limite,
             "inferer": inferer,
             "nom_profil": nom_profil,
+            "corpus_id": corpus_id,
         }
         with source.materialiser() as repertoire:
             return self._pipeline(dossier=repertoire, **options)

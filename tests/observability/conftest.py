@@ -92,7 +92,7 @@ class EspionAgentInner:
         self.exception = exception
         self.appels: list[str] = []
 
-    def query(self, requete: str) -> Any:
+    def query(self, requete: str, *, corpus_id: str | None = None) -> Any:
         self.appels.append(requete)
         if self.exception is not None:
             raise self.exception
@@ -121,6 +121,7 @@ class EspionIngestionInner:
         limite: int | None = None,
         inferer: bool = True,
         nom_profil: str | None = None,
+        corpus_id: str | None = None,
     ) -> Any:
         self.appels.append(
             {
@@ -129,6 +130,7 @@ class EspionIngestionInner:
                 "limite": limite,
                 "inferer": inferer,
                 "nom_profil": nom_profil,
+                "corpus_id": corpus_id,
             }
         )
         if self.exception is not None:

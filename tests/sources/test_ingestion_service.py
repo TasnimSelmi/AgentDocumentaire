@@ -76,6 +76,7 @@ def test_sync_transmet_les_options_telles_quelles(tmp_path):
         "limite": 3,
         "inferer": False,
         "nom_profil": "generic",
+        "corpus_id": None,
     }
 
 
@@ -91,6 +92,7 @@ def test_sync_valeurs_par_defaut_identiques_a_ingerer(tmp_path):
         "limite": None,
         "inferer": True,
         "nom_profil": None,
+        "corpus_id": None,
     }
 
 

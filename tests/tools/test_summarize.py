@@ -96,12 +96,17 @@ class _FauxCatalogue:
 
 def _resoudre_vers(monkeypatch, doc_id: str, passages: list[Passage]) -> None:
     """Câble la résolution documentaire + le chargement pour un seul document connu."""
-    monkeypatch.setattr(summarize, "get_profil", lambda: None)
-    monkeypatch.setattr(summarize, "catalogue", lambda profil=None: _FauxCatalogue(_perimetre_exact(doc_id)))
+    monkeypatch.setattr(
+        summarize,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(_perimetre_exact(doc_id)),
+    )
     monkeypatch.setattr(
         summarize,
         "charger_document",
-        lambda cible: passages if cible == doc_id else (_ for _ in ()).throw(DocumentInconnu(cible)),
+        lambda cible, corpus_id=None: passages
+        if cible == doc_id
+        else (_ for _ in ()).throw(DocumentInconnu(cible)),
     )
 
 
@@ -121,16 +126,17 @@ def _resoudre_vers_plusieurs(monkeypatch, documents_par_doc_id: dict[str, list[P
     recommence à S1 (exactement le comportement réel de `charger_document`,
     Action 02) : c'est précisément la situation qui provoquait la collision.
     """
-    monkeypatch.setattr(summarize, "get_profil", lambda: None)
     monkeypatch.setattr(
         summarize,
         "catalogue",
-        lambda profil=None: _FauxCatalogue(_perimetre_compatible(tuple(documents_par_doc_id))),
+        lambda profil=None, corpus_id=None: _FauxCatalogue(
+            _perimetre_compatible(tuple(documents_par_doc_id))
+        ),
     )
     monkeypatch.setattr(
         summarize,
         "charger_document",
-        lambda cible: documents_par_doc_id.get(cible)
+        lambda cible, corpus_id=None: documents_par_doc_id.get(cible)
         or (_ for _ in ()).throw(DocumentInconnu(cible)),
     )
 
@@ -305,9 +311,10 @@ def test_ordre_des_lots_respecte_lordre_documentaire(monkeypatch):
 
 
 def test_document_inconnu_echoue_proprement(monkeypatch):
-    monkeypatch.setattr(summarize, "get_profil", lambda: None)
     monkeypatch.setattr(
-        summarize, "catalogue", lambda profil=None: _FauxCatalogue(DocumentInconnu("Z introuvable"))
+        summarize,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(DocumentInconnu("Z introuvable")),
     )
 
     llm = LLMScripte(_cite_tout)
@@ -319,9 +326,12 @@ def test_document_inconnu_echoue_proprement(monkeypatch):
 
 
 def test_document_ambigu_echoue_proprement(monkeypatch):
-    monkeypatch.setattr(summarize, "get_profil", lambda: None)
     perimetre_ambigu = PerimetreDocumentaire(statut="ambigu", raison="marge_insuffisante")
-    monkeypatch.setattr(summarize, "catalogue", lambda profil=None: _FauxCatalogue(perimetre_ambigu))
+    monkeypatch.setattr(
+        summarize,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(perimetre_ambigu),
+    )
 
     llm = LLMScripte(_cite_tout)
     outil = summarize.definir_summarize()
@@ -332,12 +342,15 @@ def test_document_ambigu_echoue_proprement(monkeypatch):
 
 
 def test_collection_indisponible_echoue_proprement(monkeypatch):
-    monkeypatch.setattr(summarize, "get_profil", lambda: None)
-    monkeypatch.setattr(summarize, "catalogue", lambda profil=None: _FauxCatalogue(_perimetre_exact("A")))
+    monkeypatch.setattr(
+        summarize,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(_perimetre_exact("A")),
+    )
     monkeypatch.setattr(
         summarize,
         "charger_document",
-        lambda cible: (_ for _ in ()).throw(CollectionIndisponible("absente")),
+        lambda cible, corpus_id=None: (_ for _ in ()).throw(CollectionIndisponible("absente")),
     )
 
     llm = LLMScripte(_cite_tout)

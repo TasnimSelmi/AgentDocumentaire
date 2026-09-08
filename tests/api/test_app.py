@@ -32,9 +32,20 @@ def test_create_app_sans_arguments_est_offline():
     assert "local" in app.state.sources
 
 
-def test_openapi_expose_les_trois_routes():
+def test_openapi_expose_les_routes_attendues():
     schema = create_app().openapi()
-    assert set(schema["paths"]) == {"/health", "/query", "/ingestion"}
+    assert set(schema["paths"]) == {
+        "/health",
+        "/query",
+        "/ingestion",
+        "/corpora",
+        "/corpora/{corpus_id}",
+        "/corpora/{corpus_id}/profile",
+        "/corpora/{corpus_id}/profile/validate",
+        "/corpora/{corpus_id}/upload",
+        "/corpora/{corpus_id}/import-url",
+        "/sources",
+    }
 
 
 def test_openapi_ne_definit_aucun_modele_miroir_agentresponse():
@@ -57,7 +68,18 @@ def test_injection_des_collaborateurs():
 
 def test_registre_par_defaut_pointe_sur_le_dossier_configure():
     registre = registre_sources_par_defaut()
-    assert set(registre) == {"local"}
-    source = registre["local"]()
+    assert set(registre) == {"local", "managed"}
+    source = registre["local"]("default")
     assert isinstance(source, LocalDocumentSource)
     assert Path(source.racine) == Path(get_settings().documents_dir)
+
+
+def test_registre_par_defaut_source_managed_est_propre_au_corpus():
+    from src.rag.corpus import dossier_managed_pour_corpus
+
+    registre = registre_sources_par_defaut()
+    source_a = registre["managed"]("corpus_a")
+    source_b = registre["managed"]("corpus_b")
+    assert Path(source_a.racine) == dossier_managed_pour_corpus("corpus_a")
+    assert Path(source_b.racine) == dossier_managed_pour_corpus("corpus_b")
+    assert source_a.racine != source_b.racine

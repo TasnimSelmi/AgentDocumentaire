@@ -17,6 +17,7 @@ sans couche d'authentification en amont. Voir `docs/P2.3_API.md`.
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from src.agent.service import AgentService
 from src.api.dependencies import (
@@ -61,6 +62,18 @@ def create_app(
     app.state.ingestion_service = ingestion_service or ingestion_service_par_defaut()
     app.state.sources = (
         sources if sources is not None else registre_sources_par_defaut()
+    )
+
+    # MVP sans authentification (cf. module docstring) : les deux pages
+    # frontend sont des fichiers HTML statiques ouverts en local (origine
+    # `file://` ou un simple serveur statique de dev), jamais un domaine
+    # de confiance à restreindre finement ici. Pas de cookies/identifiants
+    # transportés (`allow_credentials` reste `False`).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     enregistrer_gestionnaires_erreurs(app)

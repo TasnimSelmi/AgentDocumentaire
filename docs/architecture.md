@@ -586,6 +586,40 @@ HTTP → CorrelationMiddleware (ASGI pur) → routes FastAPI (inchangées)
   un autre `TraceSink` — **non implémenté**. Détails :
   [P2.4_OBSERVABILITY.md](P2.4_OBSERVABILITY.md).
 
+### 7.10 Interface Streamlit (`src/ui/`, P2.5)
+
+Frontend **client HTTP pur**. Streamlit ne parle qu'à l'API FastAPI via une
+abstraction dédiée `ApiClient` — aucune logique agentique, aucun accès Qdrant /
+Ollama, aucune ingestion directe, aucune duplication du routage.
+
+```
+Navigateur → Streamlit (src/ui/app.py) → ApiClient (src/ui/api_client.py)
+           → FastAPI (src/api/**) → AgentService / IngestionService → cœur gelé
+```
+
+- **`src/ui/` interdit d'importer** `src.agent` / `src.rag` / `src.tools` /
+  `src.sources` (garde-fou : `tests/ui/test_architecture.py`).
+- **`ApiClient`** (`httpx`) : `health()` / `query(question)` /
+  `ingest(source, reinitialiser, limite)` ; timeouts explicites par endpoint ;
+  **aucun retry** sur `POST /query` / `POST /ingestion` (`HTTPTransport(retries=0)`) ;
+  erreurs typées (`ApiUnavailableError`, `ApiTimeoutError`, `ApiHttpError`,
+  `ApiResponseError`) sans stack ni message backend ; parsing JSON défensif
+  **total** ; récupération de `X-Request-Id` / `X-Execution-Id` ; distinction
+  `200` / `422` / `500` / `503`.
+- **Modèles sûrs** (`QueryResult`, `IngestionResult`, `SourceItem`) : ne
+  portent **que** l'affichable — pas de `data` / `metadata` / `error.message` /
+  `error.stack`, pas de listes `erreurs` / `avertissements` d'ingestion. Un
+  refus (`status="refusal"`, HTTP 200) est un résultat métier, pas une panne.
+- **Design system** centralisé (`src/ui/styles.py` : `DesignTokens` +
+  `build_css`). Palette **provisoire** documentée — charte officielle INSY2S à
+  poser dans `PROVISIONAL_TOKENS`, logo dans `assets/`. CSS limité, classes
+  `adoc-*` contrôlées, composants Streamlit natifs privilégiés.
+- **Session** (`st.session_state`) UI-only : historique borné (25), jamais
+  renvoyé au backend, aucune mémoire agentique.
+- Le backend n'a **aucune** dépendance vers `src/ui/` : frontend remplaçable
+  (React, autre) sans y toucher. Détails : [P2.5_UI.md](P2.5_UI.md). Lancement :
+  `uvicorn "src.api:create_app" --factory` puis `streamlit run src/ui/app.py`.
+
 ---
 
 ## 8. LLM (`src/llm/`)
@@ -636,5 +670,6 @@ retrieval ni le routage.
 | Contrat de sortie unique pour un consommateur externe ? | `agent/response.py` (`AgentResponse`, déterministe) |
 | Exposer les façades en HTTP/JSON ? | `api/**` (transport, validation, mapping HTTP) |
 | Tracer requêtes agent / ingestions (durée, statut, corrélation) ? | `observability/**` (`CorrelationMiddleware`, `Instrumented*Service`, `TraceSink`) |
+| Interface web pour poser une question / lancer une ingestion ? | `ui/**` (Streamlit → `ApiClient` → HTTP ; aucun accès direct au cœur) |
 | Quel modèle LLM, comment l'appeler ? | `llm/factory.py` + `llm/common.py` |
 | Mesurer la qualité ? | `evaluation/` (jamais `src/`) |

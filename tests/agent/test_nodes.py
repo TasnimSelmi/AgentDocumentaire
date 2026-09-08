@@ -307,7 +307,7 @@ def test_noeud_summarize_transmet_les_documents_resolus(monkeypatch) -> None:
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("doc-cnil",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
     fabrique, appels = _outil_summarize_capture(resultat)
@@ -332,7 +332,7 @@ def test_noeud_summarize_transmet_les_documents_resolus(monkeypatch) -> None:
 
 def test_noeud_summarize_sans_document_resolu_passe_documents_none(monkeypatch) -> None:
     perimetre = PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance")
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
     fabrique, appels = _outil_summarize_capture(resultat)
@@ -354,7 +354,7 @@ def test_noeud_summarize_exact_appelle_summarize_une_fois_avec_un_document(monke
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("doc-unique",), libelles=("Rapport unique",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
     fabrique, appels = _outil_summarize_capture(resultat)
@@ -377,7 +377,7 @@ def test_noeud_summarize_ambiguite_refuse_sans_appeler_summarize(monkeypatch) ->
     perimetre = PerimetreDocumentaire(
         statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat = ResultatOutil(outil="summarize", succes=False, message="ne doit pas être appelé")
     fabrique, appels = _outil_summarize_capture(resultat)
@@ -403,7 +403,7 @@ def test_noeud_summarize_compatible_multi_documents_refuse_sans_appeler_summariz
         valeurs_filtre=("doc-a", "doc-b", "doc-c"),
         libelles=("Doc A", "Doc B", "Doc C"),
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat = ResultatOutil(outil="summarize", succes=False, message="ne doit pas être appelé")
     fabrique, appels = _outil_summarize_capture(resultat)
@@ -422,7 +422,7 @@ def test_noeud_summarize_compatible_multi_documents_refuse_sans_appeler_summariz
 
 
 def test_noeud_summarize_resolution_en_echec_ne_casse_pas_le_graphe(monkeypatch) -> None:
-    def _explose(requete: str):
+    def _explose(requete: str, corpus_id: str | None = None):
         raise RuntimeError("collection indisponible")
 
     monkeypatch.setattr(nodes, "resoudre_document", _explose)
@@ -758,7 +758,7 @@ def test_noeud_classify_document_resolu_utilise_mode_document_complet_sans_searc
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
     fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
@@ -784,7 +784,9 @@ def test_noeud_classify_document_resolu_utilise_mode_document_complet_sans_searc
 
 def test_noeud_classify_ne_relance_pas_search_si_sources_deja_presentes(monkeypatch) -> None:
     monkeypatch.setattr(
-        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+        nodes,
+        "resoudre_document",
+        lambda requete, corpus_id=None: PerimetreDocumentaire(statut="aucun", raison="aucune"),
     )
 
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
@@ -817,7 +819,7 @@ def test_noeud_classify_document_non_ambigu_refuse_sans_appeler_loutil(monkeypat
     perimetre = PerimetreDocumentaire(
         statut="compatible", valeurs_filtre=("doc-a", "doc-b"), libelles=("Doc A", "Doc B")
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
     fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
@@ -844,7 +846,7 @@ def test_noeud_classify_document_ambigu_refuse_sans_search(monkeypatch) -> None:
     perimetre = PerimetreDocumentaire(
         statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
     fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
@@ -874,7 +876,7 @@ def test_noeud_classify_document_introuvable_refuse_sans_search(monkeypatch) -> 
     du tout (voir `test_noeud_classify_ne_relance_pas_search_si_sources_deja_presentes`).
     """
     perimetre = PerimetreDocumentaire(statut="aucun", raison="score_insuffisant", score=0.05)
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
     fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
@@ -897,7 +899,9 @@ def test_noeud_classify_document_introuvable_refuse_sans_search(monkeypatch) -> 
 
 def test_noeud_classify_passe_par_le_registre_et_journalise(monkeypatch) -> None:
     monkeypatch.setattr(
-        nodes, "resoudre_document", lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune")
+        nodes,
+        "resoudre_document",
+        lambda requete, corpus_id=None: PerimetreDocumentaire(statut="aucun", raison="aucune"),
     )
 
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
@@ -960,7 +964,7 @@ def test_noeud_extract_document_resolu_utilise_mode_document_complet_sans_search
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
     fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
@@ -988,7 +992,7 @@ def test_noeud_extract_document_ambigu_refuse_sans_appeler_loutil(monkeypatch) -
     perimetre = PerimetreDocumentaire(
         statut="compatible", valeurs_filtre=("doc-a", "doc-b"), libelles=("Doc A", "Doc B")
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
     fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
@@ -1013,7 +1017,7 @@ def test_noeud_extract_document_ambigu_refuse_sans_appeler_loutil(monkeypatch) -
 def test_noeud_extract_document_introuvable_refuse_sans_search(monkeypatch) -> None:
     """Correspondance détectée mais sous le seuil de résolution : refus propre, aucun search."""
     perimetre = PerimetreDocumentaire(statut="aucun", raison="score_insuffisant", score=0.05)
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
     fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
@@ -1043,7 +1047,9 @@ def test_noeud_extract_aucun_document_fiable_refuse_sans_search_ni_extract(monke
     monkeypatch.setattr(
         nodes,
         "resoudre_document",
-        lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance"),
+        lambda requete, corpus_id=None: PerimetreDocumentaire(
+            statut="aucun", raison="aucune_correspondance"
+        ),
     )
 
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
@@ -1075,7 +1081,9 @@ def test_noeud_extract_ne_choisit_jamais_un_document_depuis_un_top_k(monkeypatch
     monkeypatch.setattr(
         nodes,
         "resoudre_document",
-        lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance"),
+        lambda requete, corpus_id=None: PerimetreDocumentaire(
+            statut="aucun", raison="aucune_correspondance"
+        ),
     )
 
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
@@ -1102,7 +1110,9 @@ def test_noeud_extract_journalise_le_refus_aucun_document_fiable(monkeypatch) ->
     monkeypatch.setattr(
         nodes,
         "resoudre_document",
-        lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance"),
+        lambda requete, corpus_id=None: PerimetreDocumentaire(
+            statut="aucun", raison="aucune_correspondance"
+        ),
     )
 
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")

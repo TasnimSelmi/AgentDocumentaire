@@ -229,9 +229,20 @@ def test_body_query_strictement_identique_a_p2_3(build_client):
     assert r.json() == riche.vers_dict()
 
 
-def test_openapi_toujours_trois_routes_seulement(build_client):
+def test_openapi_instrumentation_najoute_aucune_route(build_client):
     app = build_client().app
-    assert set(app.openapi()["paths"]) == {"/health", "/query", "/ingestion"}
+    assert set(app.openapi()["paths"]) == {
+        "/health",
+        "/query",
+        "/ingestion",
+        "/corpora",
+        "/corpora/{corpus_id}",
+        "/corpora/{corpus_id}/profile",
+        "/corpora/{corpus_id}/profile/validate",
+        "/corpora/{corpus_id}/upload",
+        "/corpora/{corpus_id}/import-url",
+        "/sources",
+    }
     schemas = app.openapi().get("components", {}).get("schemas", {})
     assert "AgentResponse" not in schemas
     assert "ObservabilityEvent" not in schemas

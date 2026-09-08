@@ -58,7 +58,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.config import get_profil
 from src.llm.common import (
     bloc_profil_domaine,
     extraire_json_objet,
@@ -833,7 +832,9 @@ def _source_depuis_passage(passage: Passage) -> SourceOutil:
     )
 
 
-def _resoudre_document_unique(documents: list[str]) -> tuple[str, str | None]:
+def _resoudre_document_unique(
+    documents: list[str], corpus_id: str = "default"
+) -> tuple[str, str | None]:
     """
     Résout des noms/identifiants de documents vers un unique doc_id réel.
 
@@ -853,7 +854,7 @@ def _resoudre_document_unique(documents: list[str]) -> tuple[str, str | None]:
         ``(doc_id, libelle)`` — ``libelle`` est le nom lisible du document
         (pour les prompts), ``None`` si indisponible.
     """
-    perimetre = catalogue(profil=get_profil()).perimetre_explicite(documents)
+    perimetre = catalogue(corpus_id=corpus_id).perimetre_explicite(documents)
 
     if not perimetre.contraignant:
         raise DocumentInconnu(
@@ -1130,8 +1131,8 @@ def _executer_classify_document_complet(
     citation valide). La décision d'agrégation est un calcul Python pur.
     """
     try:
-        doc_id, libelle = _resoudre_document_unique(documents)
-        passages = charger_document(doc_id)
+        doc_id, libelle = _resoudre_document_unique(documents, corpus_id=contexte.corpus_id)
+        passages = charger_document(doc_id, corpus_id=contexte.corpus_id)
     except DocumentInconnu as exc:
         return ResultatOutil.echec("classify", str(exc))
     except CollectionIndisponible as exc:

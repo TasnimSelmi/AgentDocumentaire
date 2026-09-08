@@ -104,12 +104,17 @@ class _FauxCatalogueUnique:
 
 
 def _cabler(module, monkeypatch, doc_id: str, passages: list[Passage]) -> None:
-    monkeypatch.setattr(module, "get_profil", lambda: None)
-    monkeypatch.setattr(module, "catalogue", lambda profil=None: _FauxCatalogueUnique(doc_id))
+    monkeypatch.setattr(
+        module,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogueUnique(doc_id),
+    )
     monkeypatch.setattr(
         module,
         "charger_document",
-        lambda cible: passages if cible == doc_id else (_ for _ in ()).throw(DocumentInconnu(cible)),
+        lambda cible, corpus_id=None: passages
+        if cible == doc_id
+        else (_ for _ in ()).throw(DocumentInconnu(cible)),
     )
 
 

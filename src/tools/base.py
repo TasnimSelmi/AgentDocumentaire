@@ -239,6 +239,12 @@ class ContexteOutil:
     llm: Any | None = None
     profil_domaine: Any | None = None
 
+    #: Corpus logique actif pour toute la requête (isolation multi-corpus,
+    #: voir `src.rag.corpus`). Transmis explicitement à la construction de
+    #: la session — jamais un état global mutable partagé entre requêtes.
+    #: "default" préserve le comportement historique (mono-corpus).
+    corpus_id: str = "default"
+
     sources: list[SourceOutil] = field(default_factory=list)
     resultats: list[ResultatOutil] = field(default_factory=list)
 

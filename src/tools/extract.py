@@ -77,7 +77,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.config import get_profil
 from src.llm.common import (
     bloc_profil_domaine,
     extraire_json_objet,
@@ -309,9 +308,12 @@ def _partitionner(
 # ===========================================================================
 
 
-def _resoudre_document_unique(documents: list[str]) -> tuple[str, str | None]:
+def _resoudre_document_unique(
+    documents: list[str], corpus_id: str = "default"
+) -> tuple[str, str | None]:
     """
-    Résout des noms/identifiants de documents vers un unique doc_id réel.
+    Résout des noms/identifiants de documents vers un unique doc_id réel,
+    DANS LE CORPUS `corpus_id`.
 
     Réutilise `CatalogueDocuments.perimetre_explicite`, exactement la même
     primitive de résolution documentaire que `summarize`/`classify` : aucune
@@ -323,7 +325,7 @@ def _resoudre_document_unique(documents: list[str]) -> tuple[str, str | None]:
     document n'est identifiable de façon fiable, OU si plus d'un document
     est résolu.
     """
-    perimetre = catalogue(profil=get_profil()).perimetre_explicite(documents)
+    perimetre = catalogue(corpus_id=corpus_id).perimetre_explicite(documents)
 
     if not perimetre.contraignant:
         raise DocumentInconnu(
@@ -897,8 +899,8 @@ def _executer_extract_document_complet(
     déterministe en Python (`_agreger_extractions`) -> résultat sourcé.
     """
     try:
-        doc_id, libelle = _resoudre_document_unique(documents)
-        passages = charger_document(doc_id)
+        doc_id, libelle = _resoudre_document_unique(documents, corpus_id=contexte.corpus_id)
+        passages = charger_document(doc_id, corpus_id=contexte.corpus_id)
     except DocumentInconnu as exc:
         return ResultatOutil.echec("extract", str(exc))
     except CollectionIndisponible as exc:

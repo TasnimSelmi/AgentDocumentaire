@@ -261,7 +261,7 @@ def test_profil_actif_charge_depuis_la_configuration(monkeypatch):
     """Le chargement passe bien par le loader existant, non réécrit."""
     appels: list[str] = []
 
-    def faux_chargement():
+    def faux_chargement(profile_name=None):
         appels.append("appelé")
         return PROFIL_TEST
 

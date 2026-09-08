@@ -510,7 +510,7 @@ def test_B_routage_resume_francais(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_summarize = ResultatOutil(
@@ -540,7 +540,7 @@ def test_C_routage_resume_anglais(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_summarize = ResultatOutil(
@@ -564,7 +564,7 @@ def test_C_routage_resume_anglais(monkeypatch):
 def test_D_summarize_appele_une_fois_search_jamais(monkeypatch):
     """Pour SUMMARIZE : summarize appelé exactement une fois, search jamais."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_summarize = ResultatOutil(outil="summarize", succes=True, message="ok")
@@ -590,7 +590,7 @@ def test_E_documents_transmis_au_tool(monkeypatch):
         valeurs_filtre=("doc-a",),
         libelles=("Rapport A",),
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_summarize = ResultatOutil(outil="summarize", succes=True, message="ok")
@@ -615,7 +615,7 @@ def test_E2_perimetre_multi_documents_refuse_sans_appeler_summarize(monkeypatch)
         valeurs_filtre=("doc-a", "doc-b"),
         libelles=("Rapport A", "Rapport B"),
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_summarize = ResultatOutil(outil="summarize", succes=True, message="ne doit pas être appelé")
@@ -638,7 +638,7 @@ def test_E2_perimetre_multi_documents_refuse_sans_appeler_summarize(monkeypatch)
 def test_F_succes_devient_la_reponse_finale(monkeypatch):
     """`ResultatOutil.succes=True` -> réponse finale de l'agent correctement remplie."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_summarize = ResultatOutil(
@@ -667,7 +667,7 @@ def test_F_succes_devient_la_reponse_finale(monkeypatch):
 def test_G_echec_tool_termine_proprement_sans_boucle_qa(monkeypatch):
     """`succes=False` -> le graphe termine proprement, sans crash ni boucle QA."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-x",), libelles=("Doc X",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_echec = ResultatOutil(
@@ -697,7 +697,7 @@ def test_H_sans_document_explicite_reutilise_le_contexte_existant(monkeypatch):
     cohérent avec le mode historique de summarize (résume ContexteOutil.sources).
     """
     perimetre = PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance")
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_summarize = ResultatOutil(
@@ -731,7 +731,7 @@ def test_I_ambiguite_documentaire_conserve_le_refus(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_ne_doit_pas_servir = ResultatOutil(
@@ -789,7 +789,7 @@ def test_classify_A_qa_reste_search(monkeypatch):
 def test_classify_B_resume_reste_summarize(monkeypatch):
     """« Résume le rapport CNIL. » reste SUMMARIZE, classify jamais appelé."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-cnil",), libelles=("CNIL",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     fabrique_summarize, appels_summarize = _outil_summarize_capture(
@@ -825,7 +825,7 @@ def test_classify_C_classification_francaise(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_classify = ResultatOutil(
@@ -854,7 +854,7 @@ def test_classify_D_classification_anglaise(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
@@ -882,7 +882,7 @@ def test_classify_E_bon_tool_search_au_plus_une_fois(monkeypatch):
     vers la boucle QA.
     """
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
@@ -910,7 +910,7 @@ def test_classify_F_document_transmis(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
@@ -932,7 +932,7 @@ def test_classify_F_document_transmis(monkeypatch):
 def test_classify_G_succes_devient_la_reponse_finale(monkeypatch):
     """`ResultatOutil.succes=True` -> réponse finale de l'agent correctement remplie."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_classify = ResultatOutil(
@@ -961,7 +961,7 @@ def test_classify_G_succes_devient_la_reponse_finale(monkeypatch):
 def test_classify_H_echec_termine_proprement_sans_boucle_qa(monkeypatch):
     """`succes=False` -> le graphe termine proprement, sans crash ni boucle QA."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-x",), libelles=("Doc X",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_echec = ResultatOutil(
@@ -995,7 +995,7 @@ def test_classify_I_ambiguite_documentaire_conserve_le_refus(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_jamais_appele = ResultatOutil(
@@ -1047,7 +1047,7 @@ def test_extract_A_qa_reste_search(monkeypatch):
 def test_extract_B_summarize_reste_summarize(monkeypatch):
     """« Résume le rapport CNIL. » reste SUMMARIZE, extract jamais appelé."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-cnil",), libelles=("CNIL",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     fabrique_summarize, appels_summarize = _outil_summarize_capture(
@@ -1075,7 +1075,7 @@ def test_extract_C_classify_reste_classify(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     fabrique_classify, appels_classify = _outil_classify_capture(
@@ -1102,7 +1102,7 @@ def test_extract_D_explicite_route_vers_extract_document_complet(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="exact", valeurs_filtre=("cnil-44e-rapport-annuel-2023.pdf",), libelles=("CNIL 2023",)
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
@@ -1133,7 +1133,7 @@ def test_extract_E_implicite_route_vers_extract(monkeypatch):
     monkeypatch.setattr(
         nodes,
         "resoudre_document",
-        lambda requete: PerimetreDocumentaire(
+        lambda requete, corpus_id=None: PerimetreDocumentaire(
             statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",)
         ),
     )
@@ -1168,7 +1168,9 @@ def test_extract_E2_implicite_sans_document_fiable_refuse_sans_search(monkeypatc
     monkeypatch.setattr(
         nodes,
         "resoudre_document",
-        lambda requete: PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance"),
+        lambda requete, corpus_id=None: PerimetreDocumentaire(
+            statut="aucun", raison="aucune_correspondance"
+        ),
     )
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
@@ -1202,7 +1204,7 @@ def test_extract_F_ambiguite_documentaire_conserve_le_refus(monkeypatch):
     perimetre = PerimetreDocumentaire(
         statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
     )
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_jamais_appele = ResultatOutil(
@@ -1227,7 +1229,7 @@ def test_extract_F_ambiguite_documentaire_conserve_le_refus(monkeypatch):
 def test_extract_G_echec_termine_proprement_sans_boucle_qa(monkeypatch):
     """`succes=False` -> le graphe termine proprement, sans crash ni boucle QA."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-x",), libelles=("Doc X",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, compteur_recherche = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_echec = ResultatOutil(
@@ -1252,7 +1254,7 @@ def test_extract_G_echec_termine_proprement_sans_boucle_qa(monkeypatch):
 def test_extract_H_succes_devient_la_reponse_finale(monkeypatch):
     """`ResultatOutil.succes=True` -> réponse finale de l'agent correctement remplie."""
     perimetre = PerimetreDocumentaire(statut="exact", valeurs_filtre=("doc-a",), libelles=("Doc A",))
-    monkeypatch.setattr(nodes, "resoudre_document", lambda requete: perimetre)
+    monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     fabrique_search, _ = _outil_search_sequence([_SCORE_EVIDENCE_FORTE])
     resultat_extract = ResultatOutil(

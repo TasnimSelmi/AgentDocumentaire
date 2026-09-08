@@ -68,12 +68,17 @@ class _FauxCatalogue:
 
 def _resoudre_vers(monkeypatch, doc_id: str, passages: list[Passage]) -> None:
     """Câble la résolution documentaire + le chargement pour un seul document connu."""
-    monkeypatch.setattr(classify, "get_profil", lambda: None)
-    monkeypatch.setattr(classify, "catalogue", lambda profil=None: _FauxCatalogue(_perimetre_exact(doc_id)))
+    monkeypatch.setattr(
+        classify,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(_perimetre_exact(doc_id)),
+    )
     monkeypatch.setattr(
         classify,
         "charger_document",
-        lambda cible: passages if cible == doc_id else (_ for _ in ()).throw(DocumentInconnu(cible)),
+        lambda cible, corpus_id=None: passages
+        if cible == doc_id
+        else (_ for _ in ()).throw(DocumentInconnu(cible)),
     )
 
 
@@ -438,9 +443,10 @@ def test_citations_uniques_sur_tout_le_document_aucune_collision(monkeypatch):
 
 
 def test_document_introuvable_echec_propre(monkeypatch):
-    monkeypatch.setattr(classify, "get_profil", lambda: None)
     monkeypatch.setattr(
-        classify, "catalogue", lambda profil=None: _FauxCatalogue(DocumentInconnu("Z introuvable"))
+        classify,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(DocumentInconnu("Z introuvable")),
     )
 
     resultat = _executer(_contexte(LLMVotes(["rapport"])), documents=("Z",))
@@ -455,11 +461,10 @@ def test_document_introuvable_echec_propre(monkeypatch):
 
 
 def test_document_ambigu_echec_propre(monkeypatch):
-    monkeypatch.setattr(classify, "get_profil", lambda: None)
     monkeypatch.setattr(
         classify,
         "catalogue",
-        lambda profil=None: _FauxCatalogue(_perimetre_compatible(("A", "B"))),
+        lambda profil=None, corpus_id=None: _FauxCatalogue(_perimetre_compatible(("A", "B"))),
     )
 
     resultat = _executer(_contexte(LLMVotes(["rapport"])), documents=("A et B",))
@@ -688,12 +693,15 @@ def test_document_resolu_sans_contenu_indexe_echec_propre(monkeypatch):
 
 
 def test_collection_indisponible_echec_propre(monkeypatch):
-    monkeypatch.setattr(classify, "get_profil", lambda: None)
-    monkeypatch.setattr(classify, "catalogue", lambda profil=None: _FauxCatalogue(_perimetre_exact("A")))
+    monkeypatch.setattr(
+        classify,
+        "catalogue",
+        lambda profil=None, corpus_id=None: _FauxCatalogue(_perimetre_exact("A")),
+    )
     monkeypatch.setattr(
         classify,
         "charger_document",
-        lambda cible: (_ for _ in ()).throw(CollectionIndisponible("absente")),
+        lambda cible, corpus_id=None: (_ for _ in ()).throw(CollectionIndisponible("absente")),
     )
 
     resultat = _executer(_contexte(LLMVotes(["rapport"])))

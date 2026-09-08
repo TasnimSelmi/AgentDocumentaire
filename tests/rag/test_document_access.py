@@ -43,7 +43,7 @@ def _faux_parcourir_tout(corpus: list[Resultat]):
     ne renvoie que les points du corpus qui correspondent.
     """
 
-    def _parcourir(filtre, *, taille_page: int = 1024):
+    def _parcourir(filtre, *, taille_page: int = 1024, nom_collection: str | None = None):
         condition = filtre.must[0]
         assert condition.key == "doc_id"
         cible = condition.match.value
@@ -55,7 +55,9 @@ def _faux_parcourir_tout(corpus: list[Resultat]):
 @pytest.fixture(autouse=True)
 def _collection_disponible(monkeypatch):
     """Par défaut, la collection existe : chaque test le désactive s'il le teste."""
-    monkeypatch.setattr(retrieval, "info_collection", lambda: {"existe": True, "points": 1})
+    monkeypatch.setattr(
+        retrieval, "info_collection", lambda nom_collection=None: {"existe": True, "points": 1}
+    )
 
 
 # ===========================================================================
@@ -169,7 +171,7 @@ def test_doc_id_vide_leve_une_exception(monkeypatch):
 
 
 def test_collection_indisponible_court_circuite_avant_toute_lecture(monkeypatch):
-    monkeypatch.setattr(retrieval, "info_collection", lambda: {"existe": False})
+    monkeypatch.setattr(retrieval, "info_collection", lambda nom_collection=None: {"existe": False})
 
     appele = False
 

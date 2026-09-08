@@ -50,7 +50,6 @@ from typing import Any, Literal, Sequence
 from pydantic import BaseModel, Field
 
 from src.agent.multidoc_pipeline import budget_caracteres_entree_llm
-from src.config import get_profil
 from src.llm.common import (
     bloc_profil_domaine,
     invoquer_llm,
@@ -178,20 +177,22 @@ def _source_depuis_passage(passage: Passage) -> SourceOutil:
 # ===========================================================================
 
 
-def _resoudre_documents(documents: list[str]) -> tuple[str, ...]:
+def _resoudre_documents(documents: list[str], corpus_id: str = "default") -> tuple[str, ...]:
     """
-    Résout des noms/identifiants de documents vers leurs doc_id réels.
+    Résout des noms/identifiants de documents vers leurs doc_id réels, DANS
+    LE CORPUS `corpus_id` — jamais dans un autre.
 
     Réutilise `CatalogueDocuments.perimetre_explicite`, exactement la même
     primitive de résolution documentaire que `search`
     (`rechercher_passages(documents=...)`) : aucune nouvelle logique de
     résolution de nom n'est introduite ici.
 
-    Lève `DocumentInconnu` si un nom ne correspond à aucun document indexé,
-    ou si le périmètre résolu n'est pas assez fiable pour être exploité
-    (ambigu ou sans identifiant utilisable) — mêmes cas que `search`.
+    Lève `DocumentInconnu` si un nom ne correspond à aucun document indexé
+    dans ce corpus, ou si le périmètre résolu n'est pas assez fiable pour
+    être exploité (ambigu ou sans identifiant utilisable) — mêmes cas que
+    `search`.
     """
-    perimetre = catalogue(profil=get_profil()).perimetre_explicite(documents)
+    perimetre = catalogue(corpus_id=corpus_id).perimetre_explicite(documents)
 
     if not perimetre.contraignant:
         raise DocumentInconnu(
@@ -202,15 +203,18 @@ def _resoudre_documents(documents: list[str]) -> tuple[str, ...]:
     return perimetre.valeurs_filtre
 
 
-def _charger_passages_documents(doc_ids: Sequence[str]) -> list[Passage]:
+def _charger_passages_documents(
+    doc_ids: Sequence[str], corpus_id: str = "default"
+) -> list[Passage]:
     """
     Charge le contenu complet de chaque document résolu, dans l'ordre de
     résolution, chaque document restant lui-même dans son ordre documentaire
-    (`charger_document` — pagination Qdrant complète, aucune recherche).
+    (`charger_document` — pagination Qdrant complète, aucune recherche),
+    DANS LE CORPUS `corpus_id`.
     """
     passages: list[Passage] = []
     for doc_id in doc_ids:
-        passages.extend(charger_document(doc_id))
+        passages.extend(charger_document(doc_id, corpus_id=corpus_id))
     return passages
 
 
@@ -901,8 +905,8 @@ def _executer_summarize_document_complet(
     """
 
     try:
-        doc_ids = _resoudre_documents(documents)
-        passages = _charger_passages_documents(doc_ids)
+        doc_ids = _resoudre_documents(documents, corpus_id=contexte.corpus_id)
+        passages = _charger_passages_documents(doc_ids, corpus_id=contexte.corpus_id)
     except DocumentInconnu as exc:
         return ResultatOutil.echec("summarize", str(exc))
     except CollectionIndisponible as exc:

@@ -37,6 +37,7 @@ from src.config import (
     get_settings,
 )
 from src.llm.factory import construire_llm
+from src.rag.corpus import CORPUS_DEFAUT, ContexteCorpus, resoudre_corpus
 from src.rag.chunking import (
     Chunk,
     decouper_pages_recursif,
@@ -244,16 +245,21 @@ def identifiant_version_document(
     racine_documents: Path,
     empreinte: str,
     signature_pipeline: str,
+    corpus_id: str = CORPUS_DEFAUT,
 ) -> str:
     """
     Identifiant déterministe d'une version documentaire.
 
-    Il varie si le chemin, le contenu ou la configuration d'ingestion varie.
-    Deux fichiers identiques placés à deux chemins différents ne peuvent donc
-    pas se remplacer mutuellement dans Qdrant.
+    Il varie si le corpus, le chemin, le contenu ou la configuration
+    d'ingestion varie. Deux fichiers identiques placés à deux chemins
+    différents ne peuvent donc pas se remplacer mutuellement dans Qdrant —
+    et, depuis l'introduction du multi-corpus, deux corpus contenant chacun
+    un fichier de même chemin relatif et de contenu strictement identique
+    (`corpus_id` inclus dans le hash) ne collisionnent plus jamais non plus
+    (audit multi-corpus, §6).
     """
     source = chemin.resolve().relative_to(racine_documents.resolve()).as_posix()
-    valeur = f"{source}:{empreinte}:{signature_pipeline}"
+    valeur = f"{corpus_id}:{source}:{empreinte}:{signature_pipeline}"
     return str(uuid.uuid5(_NAMESPACE_DOCUMENT, valeur))
 
 
@@ -434,6 +440,7 @@ class RapportIngestion:
     """Bilan chiffré d'une exécution. Sérialisé en JSON pour le README."""
 
     profil: str = ""
+    corpus_id: str = ""
     debut: str = ""
     duree_secondes: float = 0.0
 
@@ -461,7 +468,7 @@ class RapportIngestion:
 
     def afficher(self) -> None:
         print("\n" + "=" * 62)
-        print(f"  RAPPORT D'INGESTION — profil « {self.profil} »")
+        print(f"  RAPPORT D'INGESTION — corpus « {self.corpus_id} », profil « {self.profil} »")
         print("=" * 62)
         print(f"  Durée                  : {self.duree_secondes:.1f}s")
         print(f"  Fichiers trouvés       : {self.fichiers_trouves}")
@@ -563,6 +570,7 @@ def _traiter_fichier(
     rapport: RapportIngestion,
     inferer: bool,
     racine_documents: Path,
+    corpus_id: str = CORPUS_DEFAUT,
 ) -> list[ChunkIndexable]:
     """Traite un fichier et renvoie ses chunks prêts à indexer."""
 
@@ -625,6 +633,7 @@ def _traiter_fichier(
             dense=enc.dense[i],
             sparse=enc.sparse[i],
             payload={**payload_commun, "page": c.page, **_payload_structure(c, doc_id)},
+            corpus_id=corpus_id,
         )
         for i, c in enumerate(chunks)
     ]
@@ -636,13 +645,23 @@ def ingerer(
     inferer: bool = True,
     nom_profil: str | None = None,
     dossier: Path | None = None,
+    corpus_id: str | None = None,
 ) -> RapportIngestion:
     """
-    Exécute le pipeline complet sur data/documents/.
+    Exécute le pipeline complet sur le corpus désigné.
 
-    reinitialiser : vide la collection et le registre avant de recommencer.
+    reinitialiser : vide UNIQUEMENT la collection et le registre du corpus
+                    courant (`corpus_id`) — jamais ceux d'un autre corpus.
     limite        : n'ingère que les N premiers fichiers (mise au point).
     inferer       : désactive les appels LLM (test rapide, sans coût).
+    corpus_id     : corpus logique cible (`src.rag.corpus`). Omis -> corpus
+                    « default », qui préserve exactement la collection et le
+                    registre historiquement configurés — comportement
+                    inchangé pour tout appelant existant.
+    nom_profil    : profil technique explicite, prioritaire sur celui déclaré
+                    pour le corpus (compatibilité avec l'appel historique).
+                    Omis, le profil du corpus (`config/corpus.yaml`) est
+                    utilisé.
     """
     from tqdm import tqdm
 
@@ -654,19 +673,25 @@ def ingerer(
     else s.documents_dir.resolve()
 )
     tech = get_config_technique()
-    profil = get_profil(nom_profil)
+    contexte_corpus: ContexteCorpus = resoudre_corpus(corpus_id)
+    profil = get_profil(nom_profil) if nom_profil else contexte_corpus.profil
     signature_pipeline = calculer_signature_pipeline(profil, inferer)
 
     rapport = RapportIngestion(
         profil=profil.profile_name,
+        corpus_id=contexte_corpus.corpus_id,
         debut=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
 
     # --- Préparation ---
     precharger_modeles(avec_reranker=False)
-    creer_collection(reinitialiser=reinitialiser, profil=profil)
+    creer_collection(
+        reinitialiser=reinitialiser,
+        profil=profil,
+        nom_collection=contexte_corpus.nom_collection,
+    )
 
-    registre_fichiers = RegistreFichiers(s.chemin_registre)
+    registre_fichiers = RegistreFichiers(contexte_corpus.chemin_registre)
     if reinitialiser:
         registre_fichiers.vider()
 
@@ -688,7 +713,7 @@ def ingerer(
         tous_les_fichiers
     ):
         try:
-            supprimer_document(doc_id_absent)
+            supprimer_document(doc_id_absent, nom_collection=contexte_corpus.nom_collection)
             registre_fichiers.retirer_cle(cle_registre)
             rapport.fichiers_supprimes += 1
             logger.info("Document retiré du corpus : %s", cle_registre)
@@ -735,6 +760,7 @@ def ingerer(
     racine_documents=racine_documents,
     empreinte=empreinte,
     signature_pipeline=signature_pipeline,
+    corpus_id=contexte_corpus.corpus_id,
 )
 
             # La nouvelle version est entièrement préparée avant toute
@@ -751,11 +777,12 @@ def ingerer(
                 registre_entites=registre_entites,
                 rapport=rapport,
                 inferer=inferer,
+                corpus_id=contexte_corpus.corpus_id,
             )
 
             if not chunks:
                 if ancien_doc_id:
-                    supprimer_document(ancien_doc_id)
+                    supprimer_document(ancien_doc_id, nom_collection=contexte_corpus.nom_collection)
 
                 registre_fichiers.enregistrer(
                     chemin_fichier=chemin,
@@ -766,11 +793,11 @@ def ingerer(
                 )
                 continue
 
-            n = indexer(chunks)
+            n = indexer(chunks, nom_collection=contexte_corpus.nom_collection)
 
             # La nouvelle version est maintenant complète dans Qdrant.
             if ancien_doc_id and ancien_doc_id != nouveau_doc_id:
-                supprimer_document(ancien_doc_id)
+                supprimer_document(ancien_doc_id, nom_collection=contexte_corpus.nom_collection)
 
             rapport.chunks_indexes += n
             rapport.fichiers_traites += 1

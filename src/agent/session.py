@@ -41,7 +41,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from src.config import get_config_technique, get_profil
+from src.config import get_config_technique
+from src.rag.corpus import resoudre_corpus
 from src.profiling import DomainProfile, load_active_domain_profile
 from src.tools.base import (
     ContexteOutil,
@@ -257,9 +258,11 @@ def construire_session(
     max_tentatives: int | None = None,
     fabriques: Sequence[Callable[[], DefinitionOutil]] | None = None,
     inclure_outils_ecriture: bool = False,
+    corpus_id: str = "default",
 ) -> SessionAgent:
     """
-    Assemble une session agentique complète pour une requête.
+    Assemble une session agentique complète pour une requête, strictement
+    scopée au corpus `corpus_id`.
 
     Args:
         requete: demande de l'utilisateur.
@@ -267,23 +270,31 @@ def construire_session(
             projet (`src.llm.factory.construire_llm`). Injectable pour les
             tests, comme le fait déjà `suggest_domain_profile`.
         profil_domaine: profil imposé. S'il est fourni, aucun chargement
-            n'a lieu.
-        charger_profil_domaine: charge le profil actif défini par
-            `ACTIVE_DOMAIN_PROFILE`. Mettre à False permet de travailler
+            n'a lieu (prioritaire sur celui déclaré pour le corpus).
+        charger_profil_domaine: charge le profil de domaine associé au
+            corpus (`config/corpus.yaml`, replié sur `ACTIVE_DOMAIN_PROFILE`
+            pour le corpus « default »). Mettre à False permet de travailler
             explicitement sans contexte métier.
         max_tentatives: borne des boucles. Par défaut,
             `config/default.yaml` -> `agent.max_iterations`.
         fabriques: fabriques d'outils à utiliser (tests).
         inclure_outils_ecriture: expose les outils d'action.
+        corpus_id: corpus logique actif (`src.rag.corpus`). Transmis
+            explicitement — jamais un état global mutable partagé entre
+            requêtes concurrentes. Omis -> corpus « default », comportement
+            historique inchangé.
 
     Returns:
         Une `SessionAgent` prête à l'emploi.
 
     Raises:
         ErreurSession: requête vide, ou registre inconstructible.
-        DomainProfileNotFoundError: si `ACTIVE_DOMAIN_PROFILE` désigne un
-            profil absent. Comportement existant, volontairement conservé :
-            une configuration erronée doit être visible.
+        ErreurCorpusInvalide: `corpus_id` mal formé.
+        CorpusInconnu: `corpus_id` absent de `config/corpus.yaml`.
+        DomainProfileNotFoundError: si le profil de domaine résolu pour ce
+            corpus désigne un profil absent. Comportement existant,
+            volontairement conservé : une configuration erronée doit être
+            visible.
     """
     from src.agent.state import EtatAgent  # import local : évite un cycle
 
@@ -292,10 +303,16 @@ def construire_session(
     if not question:
         raise ErreurSession("La requête de la session est vide.")
 
+    # --- Corpus logique ------------------------------------------------------
+    # Résolu une seule fois, jamais muté ni partagé entre requêtes.
+    contexte_corpus = resoudre_corpus(corpus_id)
+
     # --- Contexte métier ---------------------------------------------------
     # Le profil de domaine apporte du vocabulaire, jamais des faits.
     if profil_domaine is None and charger_profil_domaine:
-        profil_domaine = load_active_domain_profile()
+        profil_domaine = load_active_domain_profile(
+            profile_name=contexte_corpus.profil_domaine_nom
+        )
 
     if profil_domaine is not None:
         logger.info(
@@ -319,6 +336,7 @@ def construire_session(
         question=question,
         llm=llm,
         profil_domaine=profil_domaine,
+        corpus_id=contexte_corpus.corpus_id,
     )
 
     # --- Outils ------------------------------------------------------------
@@ -335,7 +353,7 @@ def construire_session(
     etat = EtatAgent(
         requete_initiale=question,
         requete_courante=question,
-        profil_technique=get_profil().profile_name,
+        profil_technique=contexte_corpus.profil.profile_name,
         profil_domaine=profil_domaine,
         max_tentatives=max_tentatives,
     )
@@ -344,6 +362,7 @@ def construire_session(
         "session",
         "Session agentique construite.",
         outils=registre.noms(),
+        corpus_id=contexte_corpus.corpus_id,
         profil_technique=etat.profil_technique,
         profil_domaine=etat.nom_profil_domaine,
         max_tentatives=max_tentatives,

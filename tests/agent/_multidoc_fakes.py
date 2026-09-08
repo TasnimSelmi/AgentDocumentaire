@@ -107,11 +107,12 @@ def cabler_corpus(
     """Câble résolution + chargement pour un ensemble de documents fictifs.
 
     `module` = `src.agent.multidoc_pipeline` (là où `catalogue` /
-    `charger_document` / `get_profil` sont importés)."""
-    monkeypatch.setattr(module, "get_profil", lambda: None)
-    monkeypatch.setattr(module, "catalogue", lambda profil=None: FauxCatalogue(fiches))
+    `charger_document` sont importés)."""
+    monkeypatch.setattr(
+        module, "catalogue", lambda profil=None, corpus_id=None: FauxCatalogue(fiches)
+    )
 
-    def _charger(doc_id: str) -> list[Passage]:
+    def _charger(doc_id: str, corpus_id: str | None = None) -> list[Passage]:
         if doc_id in passages_par_doc:
             return passages_par_doc[doc_id]
         raise DocumentInconnu(doc_id)

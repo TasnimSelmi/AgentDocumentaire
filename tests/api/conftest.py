@@ -49,9 +49,11 @@ class EspionAgentService:
         )
         self.exception = exception
         self.appels: list[str] = []
+        self.corpus_ids: list[str | None] = []
 
-    def query(self, requete: str) -> AgentResponse:
+    def query(self, requete: str, *, corpus_id: str | None = None) -> AgentResponse:
         self.appels.append(requete)
+        self.corpus_ids.append(corpus_id)
         if self.exception is not None:
             raise self.exception
         return self.reponse
@@ -81,6 +83,7 @@ class EspionIngestionService:
         limite: int | None = None,
         inferer: bool = True,
         nom_profil: str | None = None,
+        corpus_id: str | None = None,
     ) -> RapportIngestion:
         self.appels.append(
             {
@@ -89,6 +92,7 @@ class EspionIngestionService:
                 "limite": limite,
                 "inferer": inferer,
                 "nom_profil": nom_profil,
+                "corpus_id": corpus_id,
             }
         )
         if self.exception is not None:
@@ -109,10 +113,16 @@ def _qdrant_path_local(tmp_path, monkeypatch):
     """Sur cette machine, `.env` pointe `QDRANT_PATH` vers un chemin absolu non
     inscriptible et `get_settings()` tente de créer les dossiers du projet. On
     le rabat sur un tmp local (aucun Qdrant n'est ouvert par ces tests). Même
-    garde que `tests/rag/test_resolution_identifiant_exact.py`."""
+    garde que `tests/rag/test_resolution_identifiant_exact.py`.
+
+    `CORPORA_DIR` est redirigé pour la même raison : sans cela, tout test
+    d'upload/import-URL (`dossier_managed_pour_corpus`) écrirait de vrais
+    fichiers sous `data/corpora/` DANS LE DÉPÔT — indépendant de `QDRANT_PATH`
+    (voir `Settings.corpora_dir`)."""
     import src.config as config
 
     monkeypatch.setenv("QDRANT_PATH", str(tmp_path / "vectordb"))
+    monkeypatch.setenv("CORPORA_DIR", str(tmp_path / "corpora"))
     config.get_settings.cache_clear()
     config.get_config_technique.cache_clear()
     yield
@@ -138,8 +148,9 @@ def source_marqueur() -> SourceMarqueur:
 @pytest.fixture
 def sources(source_marqueur: SourceMarqueur) -> dict[str, Any]:
     """Registre à une entrée : `"local"` → une fabrique qui rend toujours la
-    même instance marqueur (traçable côté test)."""
-    return {"local": lambda: source_marqueur}
+    même instance marqueur (traçable côté test). Les fabriques reçoivent
+    `corpus_id` (signature réelle de `FabriqueSource`) mais l'ignorent ici."""
+    return {"local": lambda corpus_id: source_marqueur}
 
 
 @pytest.fixture
