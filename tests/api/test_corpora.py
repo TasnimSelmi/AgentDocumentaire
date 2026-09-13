@@ -399,6 +399,42 @@ def test_suppression_corpus_supprime_la_collection_qdrant(build_client, faux_qdr
     assert not vectorstore.info_collection(nom_collection=col)["existe"]
 
 
+def test_suppression_corpus_supprime_le_stockage_managed(build_client, faux_qdrant, monkeypatch):
+    """Le stockage géré (uploads/import URL) de ce corpus — pas seulement sa
+    collection Qdrant — disparaît du disque ; un autre corpus 'managed' n'est
+    jamais affecté."""
+    from src.rag.corpus import dossier_managed_pour_corpus
+
+    cabler_registre_corpus_inscriptible(
+        monkeypatch,
+        {
+            "default": ConfigCorpus(),
+            "finance": ConfigCorpus(source="managed"),
+            "rh": ConfigCorpus(source="managed"),
+        },
+    )
+    client = build_client()
+    client.post(
+        "/corpora/finance/upload",
+        files=[("files", ("a.pdf", b"%PDF-1.4 x", "application/pdf"))],
+        data={"paths": ["a.pdf"]},
+    )
+    client.post(
+        "/corpora/rh/upload",
+        files=[("files", ("b.pdf", b"%PDF-1.4 y", "application/pdf"))],
+        data={"paths": ["b.pdf"]},
+    )
+    assert dossier_managed_pour_corpus("finance").exists()
+    assert dossier_managed_pour_corpus("rh").exists()
+
+    reponse = client.delete("/corpora/finance")
+
+    assert reponse.status_code == 204
+    assert not dossier_managed_pour_corpus("finance").exists()
+    assert not dossier_managed_pour_corpus("finance").parent.exists()
+    assert (dossier_managed_pour_corpus("rh") / "b.pdf").exists()
+
+
 def test_suppression_corpus_inconnu_est_404(build_client, faux_qdrant, monkeypatch):
     cabler_registre_corpus_inscriptible(monkeypatch, {"default": ConfigCorpus()})
     reponse = build_client().delete("/corpora/rh")

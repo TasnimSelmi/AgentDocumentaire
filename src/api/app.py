@@ -1,11 +1,13 @@
 """
 Fabrique de l'application FastAPI.
 
-`create_app` câble les trois routes et les gestionnaires d'erreur, et place
-sur `app.state` les collaborateurs — injectables pour les tests, construits
-paresseusement sinon. Aucune logique documentaire, aucun accès réseau ici.
+`create_app` câble les routes API, les gestionnaires d'erreur et le frontend
+statique (`src/ui/`), et place sur `app.state` les collaborateurs —
+injectables pour les tests, construits paresseusement sinon. Aucune logique
+documentaire, aucun accès réseau ici.
 
-Lancement standard (aucun module `__main__` fourni, cf. design P2.3) :
+Lancement recommandé (un seul process, un seul port) : `python scripts/run.py`
+— ouvre ensuite `http://127.0.0.1:8000/`. Équivalent manuel :
 
     uvicorn "src.api:create_app" --factory --host 127.0.0.1 --port 8000
 
@@ -16,8 +18,13 @@ sans couche d'authentification en amont. Voir `docs/P2.3_API.md`.
 
 from __future__ import annotations
 
+from pathlib import Path
+from urllib.parse import quote
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.agent.service import AgentService
 from src.api.dependencies import (
@@ -30,6 +37,14 @@ from src.api.errors import enregistrer_gestionnaires_erreurs
 from src.api.routes import router
 from src.observability import TraceSink, install_observability
 from src.sources import IngestionService
+
+#: Frontend statique (P2.5+) : pages HTML autonomes (client HTTP pur vers
+#: cette même API, cf. docs/DO_NOT_TOUCH.md §4ter). Servies ici uniquement
+#: pour offrir UN process/UN port/UNE origine au lancement — aucune logique
+#: documentaire, aucune route API ajoutée à l'OpenAPI (`include_in_schema`
+#: reste par défaut sur `/`, exclu explicitement ci-dessous).
+_DOSSIER_UI = Path(__file__).resolve().parent.parent / "ui"
+_PAGE_ACCUEIL = "Gestion des corpus.html"
 
 _DESCRIPTION = (
     "API HTTP mince du MVP AgentDocumentaire (P2.3) : transport et validation "
@@ -83,6 +98,19 @@ def create_app(
     # corrélation ASGI et enveloppe les services dans leurs wrappers observants.
     # `src/api/routes.py` reste sans aucune logique d'observabilité.
     install_observability(app, sink=sink)
+
+    # Frontend statique : une seule origine, un seul port. `/ui/*` sert les
+    # fichiers de `src/ui/` tels quels (les liens relatifs entre pages —
+    # `Agent Documentaire.html?corpus_id=...` — continuent de fonctionner
+    # sans modification). `/` redirige vers la page d'accueil pour éviter à
+    # l'utilisateur de connaître un nom de fichier encodé.
+    if _DOSSIER_UI.is_dir():
+        app.mount("/ui", StaticFiles(directory=_DOSSIER_UI, html=True), name="ui")
+
+        @app.get("/", include_in_schema=False)
+        def _accueil() -> RedirectResponse:
+            return RedirectResponse(url="/ui/" + quote(_PAGE_ACCUEIL))
+
     return app
 
 

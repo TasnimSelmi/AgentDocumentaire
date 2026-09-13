@@ -1,12 +1,26 @@
+cas-challenge:
+  cree_le: '2026-09-12T23:31:48+00:00'
+  derniere_ingestion:
+    a: '2026-09-12T23:32:48+00:00'
+    chunks_indexes: 39
+    duree_secondes: 13.1
+    fichiers_en_echec: 0
+    fichiers_ignores_inchanges: 0
+    fichiers_traites: 2
+    fichiers_trouves: 2
+    statut: succes
+  nom: cas_challenge
+  profil_domaine: cas-challenge
+  source: managed
 default:
   derniere_ingestion:
-    a: '2026-09-05T22:44:29+00:00'
-    chunks_indexes: 0
-    duree_secondes: 0.1
+    a: '2026-09-12T18:27:41+00:00'
+    chunks_indexes: 5080
+    duree_secondes: 2211.9
     fichiers_en_echec: 0
-    fichiers_ignores_inchanges: 7
-    fichiers_traites: 0
-    fichiers_trouves: 7
+    fichiers_ignores_inchanges: 0
+    fichiers_traites: 218
+    fichiers_trouves: 218
     statut: succes
   profil_domaine: default
   source: local

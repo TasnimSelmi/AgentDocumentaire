@@ -195,6 +195,40 @@ def test_upload_est_additif_conserve_les_fichiers_precedents(build_client, faux_
     assert (racine / "second.pdf").exists()
 
 
+def test_upload_treize_pdf_sont_tous_recus(build_client, faux_qdrant, monkeypatch):
+    """Cas concret signalé : un dossier de 13 PDF sélectionné via « Parcourir
+    un dossier » doit être reçu et écrit intégralement pour un corpus déclaré
+    'managed' — aucune limite ni troncature en dessous de MAX_FICHIERS_UPLOAD
+    (200)."""
+    from src.rag.corpus import dossier_managed_pour_corpus
+
+    cabler_registre_corpus(
+        monkeypatch, {"default": ConfigCorpus(), "finance": ConfigCorpus(source="managed")}
+    )
+    fichiers = [
+        ("files", (f"rapport_{i:02d}.pdf", f"%PDF-1.4 contenu {i}".encode(), "application/pdf"))
+        for i in range(13)
+    ]
+    chemins = [f"rapport_{i:02d}.pdf" for i in range(13)]
+    reponse = build_client().post(
+        "/corpora/finance/upload", files=fichiers, data={"paths": chemins}
+    )
+    assert reponse.status_code == 200
+    assert reponse.json()["files_received"] == 13
+
+    racine = dossier_managed_pour_corpus("finance")
+    assert sorted(p.name for p in racine.iterdir()) == sorted(chemins)
+
+
+def test_upload_aucun_fichier_envoye_est_422(build_client, faux_qdrant, monkeypatch):
+    """Sélection annulée / dossier vide côté client : aucun champ `files` du
+    tout (distinct du cas « un fichier de contenu vide » déjà couvert par
+    `test_upload_fichier_vide_est_422`)."""
+    cabler_registre_corpus(monkeypatch, {"default": ConfigCorpus(), "rh": ConfigCorpus(source="managed")})
+    reponse = build_client().post("/corpora/rh/upload", data={"paths": []})
+    assert reponse.status_code == 422
+
+
 def test_upload_corpus_a_ne_touche_jamais_corpus_b(build_client, faux_qdrant, monkeypatch):
     from src.rag.corpus import dossier_managed_pour_corpus
 

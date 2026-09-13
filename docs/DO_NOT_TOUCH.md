@@ -232,37 +232,45 @@ Splunk…) = **nouveau module** implémentant le `Protocol`, injecté via
 
 ---
 
-## 4ter. Invariants — interface Streamlit P2.5 (`src/ui/`, gel différé)
+## 4ter. Invariants — frontend statique (`src/ui/`, gel différé)
 
-> Frontend **client HTTP pur**. Gel formel différé à la validation finale de
-> P2, comme `src/api/` et `src/observability/`. Invariants **normatifs** :
+> Frontend **client HTTP pur** : pages HTML/JS statiques (pas de framework,
+> pas de build), servies par FastAPI (`src/api/app.py`, mount `/ui` +
+> redirection `/`). Gel formel différé à la validation finale de P2, comme
+> `src/api/` et `src/observability/`. Invariants **normatifs** :
 
-- **Client HTTP uniquement.** `src/ui/**` **n'importe jamais** `src.agent` /
-  `src.rag` / `src.tools` / `src.sources` ; aucun accès direct Qdrant /
-  Ollama ; aucune ingestion directe ; aucune duplication du routage. Tout
-  passe par `ApiClient` → API FastAPI. Garde-fou : `tests/ui/test_architecture.py`.
-- **Aucune donnée réservée au backend affichée** : les modèles
-  (`QueryResult` / `IngestionResult` / `SourceItem`) ne portent que
-  l'affichable — jamais `data`, `metadata`, `error.message`, `error.stack`,
-  ni les listes `erreurs` / `avertissements` d'ingestion. Jamais de stack,
-  prompt, chain-of-thought, chemin local, config Ollama / Qdrant, secret.
-- **`refusal` (HTTP 200) n'est pas une panne** : rendu comme résultat métier
-  neutre.
-- **Aucun retry automatique** sur `POST /query` / `POST /ingestion`
-  (`httpx` avec `HTTPTransport(retries=0)`).
-- **Design system centralisé** : couleurs / rayons / ombres **uniquement**
-  dans `src/ui/styles.py::DesignTokens`. Aucun CSS dispersé. La palette
-  actuelle est **provisoire** (`IS_OFFICIAL_BRAND is False`) — appliquer la
-  charte INSY2S = remplacer `PROVISIONAL_TOKENS` + déposer le logo dans
-  `assets/`, rien d'autre. Ne pas récupérer d'asset depuis `insy2s.com`.
-- **Le backend n'a aucune dépendance vers `src/ui/`** : frontend remplaçable
-  (React, autre) sans toucher au reste. `src/ui/` supprimable sans impact.
-- **Session `st.session_state` UI-only**, historique borné, jamais renvoyé au
-  backend, aucune mémoire agentique.
+- **Client HTTP uniquement.** Les pages de `src/ui/` (`Gestion des
+  corpus.html`, `Agent Documentaire.html`, `Connexion.html`) n'appellent que
+  l'API FastAPI (`fetch` vers `API_BASE`, `/health` `/corpora*` `/query`
+  `/ingestion` `/sources`) — aucun accès direct Qdrant / Ollama, aucune
+  ingestion directe, aucune duplication du routage agentique.
+- **Aucune donnée réservée au backend affichée** : jamais de stack, prompt,
+  chain-of-thought, chemin serveur, config Ollama/Qdrant, secret. `refusal`
+  (HTTP 200) est rendu comme un résultat métier neutre, pas une panne.
+- **Historique de conversation local à la page** (état JS en mémoire, borné
+  à 12 entrées) : rejouer une entrée déjà reçue (`selectHistoryEntry`) ne
+  déclenche **jamais** un nouveau `POST /query`. Non persisté entre
+  rechargements (pas de `localStorage`) — à ne pas confondre avec une
+  session serveur, qui n'existe pas.
+- **`Connexion.html` n'est PAS une authentification réelle** : formulaire de
+  démonstration (délais simulés, aucun appel réseau, aucune redirection
+  effective au succès). Ne pas la faire passer pour une couche de sécurité
+  tant qu'aucun backend d'auth n'est branché — voir §10 de la checklist de
+  livraison.
+- **Le backend n'a aucune dépendance vers `src/ui/`** : `src/api/app.py` ne
+  fait que monter le dossier tel quel (`StaticFiles`) ; frontend remplaçable
+  (React, autre) sans toucher au reste de l'API. `src/ui/` supprimable sans
+  impact sur `src/api/**`, `src/agent/**`, `src/rag/**`.
+- **Dépendance réseau au chargement** : chaque page charge React/Babel
+  depuis `unpkg.com` et les polices depuis `fonts.googleapis.com` à
+  l'ouverture — un poste sans accès Internet sortant ne peut pas afficher le
+  frontend (l'API, elle, reste 100% locale). À documenter comme prérequis,
+  pas à corriger ici sans refonte du frontend (hors périmètre de ce
+  chantier).
 
-Modification légitime : évolution de l'UI dans `src/ui/` + `tests/ui/`, sans
-toucher aux couches gelées ni à `src/api/**` (sauf besoin bloquant démontré,
-alors STOP + explication). Voir [P2.5_UI.md](P2.5_UI.md).
+Modification légitime : évolution des pages HTML de `src/ui/`, sans toucher
+aux couches gelées ni à `src/api/**` au-delà du montage statique déjà en
+place (sauf besoin bloquant démontré, alors STOP + explication).
 
 ---
 

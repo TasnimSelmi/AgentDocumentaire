@@ -586,39 +586,38 @@ HTTP → CorrelationMiddleware (ASGI pur) → routes FastAPI (inchangées)
   un autre `TraceSink` — **non implémenté**. Détails :
   [P2.4_OBSERVABILITY.md](P2.4_OBSERVABILITY.md).
 
-### 7.10 Interface Streamlit (`src/ui/`, P2.5)
+### 7.10 Frontend statique (`src/ui/`)
 
-Frontend **client HTTP pur**. Streamlit ne parle qu'à l'API FastAPI via une
-abstraction dédiée `ApiClient` — aucune logique agentique, aucun accès Qdrant /
-Ollama, aucune ingestion directe, aucune duplication du routage.
+Frontend **client HTTP pur** : trois pages HTML autonomes (aucun framework,
+aucun build) — `Gestion des corpus.html`, `Agent Documentaire.html`,
+`Connexion.html` — qui ne parlent qu'à l'API FastAPI via `fetch`. Aucune
+logique agentique, aucun accès Qdrant/Ollama, aucune ingestion directe,
+aucune duplication du routage.
 
 ```
-Navigateur → Streamlit (src/ui/app.py) → ApiClient (src/ui/api_client.py)
-           → FastAPI (src/api/**) → AgentService / IngestionService → cœur gelé
+Navigateur → src/ui/*.html (fetch API_BASE) → FastAPI (src/api/**)
+           → AgentService / IngestionService → cœur gelé
 ```
 
-- **`src/ui/` interdit d'importer** `src.agent` / `src.rag` / `src.tools` /
-  `src.sources` (garde-fou : `tests/ui/test_architecture.py`).
-- **`ApiClient`** (`httpx`) : `health()` / `query(question)` /
-  `ingest(source, reinitialiser, limite)` ; timeouts explicites par endpoint ;
-  **aucun retry** sur `POST /query` / `POST /ingestion` (`HTTPTransport(retries=0)`) ;
-  erreurs typées (`ApiUnavailableError`, `ApiTimeoutError`, `ApiHttpError`,
-  `ApiResponseError`) sans stack ni message backend ; parsing JSON défensif
-  **total** ; récupération de `X-Request-Id` / `X-Execution-Id` ; distinction
-  `200` / `422` / `500` / `503`.
-- **Modèles sûrs** (`QueryResult`, `IngestionResult`, `SourceItem`) : ne
-  portent **que** l'affichable — pas de `data` / `metadata` / `error.message` /
-  `error.stack`, pas de listes `erreurs` / `avertissements` d'ingestion. Un
-  refus (`status="refusal"`, HTTP 200) est un résultat métier, pas une panne.
-- **Design system** centralisé (`src/ui/styles.py` : `DesignTokens` +
-  `build_css`). Palette **provisoire** documentée — charte officielle INSY2S à
-  poser dans `PROVISIONAL_TOKENS`, logo dans `assets/`. CSS limité, classes
-  `adoc-*` contrôlées, composants Streamlit natifs privilégiés.
-- **Session** (`st.session_state`) UI-only : historique borné (25), jamais
-  renvoyé au backend, aucune mémoire agentique.
+- **Servies par FastAPI elle-même** : `src/api/app.py` monte `src/ui/` sous
+  `/ui` (`StaticFiles`) et redirige `/` vers la page d'accueil — un seul
+  process, un seul port, une seule origine (voir `scripts/run.py`).
+- **`Gestion des corpus.html`** : liste/création/suppression de corpus,
+  upload de dossier, import URL, synchronisation (`POST /ingestion`),
+  proposition/validation de profil de domaine. Lien vers l'agent :
+  `Agent Documentaire.html?corpus_id=<id>`.
+- **`Agent Documentaire.html`** : interrogation (`POST /query`), affichage
+  sourcé (SUCCESS/PARTIAL/REFUSAL/ERROR), historique de session **local à
+  la page** (état JS en mémoire, borné à 12 entrées, non persisté) — relire
+  une entrée ne refait jamais d'appel `/query`.
+- **`Connexion.html`** : page de démonstration, **non branchée** à un
+  backend d'authentification (aucun appel réseau, formulaire simulé) — voir
+  §10 de la checklist de livraison (`docs/DO_NOT_TOUCH.md` §4ter).
 - Le backend n'a **aucune** dépendance vers `src/ui/` : frontend remplaçable
-  (React, autre) sans y toucher. Détails : [P2.5_UI.md](P2.5_UI.md). Lancement :
-  `uvicorn "src.api:create_app" --factory` puis `streamlit run src/ui/app.py`.
+  sans toucher à l'API. Dépendance réseau au chargement (React/Babel via
+  `unpkg.com`, polices via `fonts.googleapis.com`) — un poste sans sortie
+  Internet ne peut pas afficher les pages, même si l'API reste locale.
+  Lancement unique : `python scripts/run.py` → `http://127.0.0.1:8000/`.
 
 ---
 
@@ -670,6 +669,6 @@ retrieval ni le routage.
 | Contrat de sortie unique pour un consommateur externe ? | `agent/response.py` (`AgentResponse`, déterministe) |
 | Exposer les façades en HTTP/JSON ? | `api/**` (transport, validation, mapping HTTP) |
 | Tracer requêtes agent / ingestions (durée, statut, corrélation) ? | `observability/**` (`CorrelationMiddleware`, `Instrumented*Service`, `TraceSink`) |
-| Interface web pour poser une question / lancer une ingestion ? | `ui/**` (Streamlit → `ApiClient` → HTTP ; aucun accès direct au cœur) |
+| Interface web pour poser une question / lancer une ingestion ? | `ui/**` (pages HTML statiques → `fetch` HTTP ; aucun accès direct au cœur), servies par `src/api/app.py` |
 | Quel modèle LLM, comment l'appeler ? | `llm/factory.py` + `llm/common.py` |
 | Mesurer la qualité ? | `evaluation/` (jamais `src/`) |
