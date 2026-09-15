@@ -11,12 +11,25 @@ Vérifie avant de démarrer : Ollama joignable, modèle configuré disponible,
 dossiers runtime créés (`data/...`). N'écrit, ne réinitialise et ne
 supprime jamais de collection Qdrant : c'est un lanceur, pas un outil
 d'administration.
+
+Filet de sécurité à l'arrêt (Ctrl+C) : une requête encore en cours (ex.
+génération LLM sans timeout, cf. `src/llm/factory.py`) tourne dans un thread
+non-démon (pool de threads d'AnyIO/Starlette pour les routes synchrones) ;
+tant qu'il n'a pas terminé, l'arrêt normal d'uvicorn attend indéfiniment
+avant de rendre la main, et le process reste vivant, port 8000 et verrou
+Qdrant local (`data/vectordb/.lock`) toujours tenus — bloquant tout
+relancement. Passé `DELAI_ARRET_FORCE_S` secondes après la demande d'arrêt,
+ce script force la sortie du process (`os._exit`) plutôt que d'attendre
+indéfiniment.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -29,6 +42,9 @@ from src.config import get_settings  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 8000
+#: Délai laissé à une requête en cours pour se terminer après un Ctrl+C,
+#: avant sortie forcée du process (voir docstring du module).
+DELAI_ARRET_FORCE_S = 15.0
 
 
 def _url_ollama(base_url: str | None) -> str:
@@ -58,6 +74,24 @@ def _verifier_ollama(base_url: str, modele: str) -> None:
         raise SystemExit(1)
 
 
+def _surveiller_arret_force(server: "uvicorn.Server", delai_s: float) -> None:
+    """Thread démon : force la sortie du process si l'arrêt demandé
+    (Ctrl+C / SIGTERM, `server.should_exit` passé à `True` par uvicorn) n'a
+    pas suffi à terminer le process dans `delai_s` secondes — typiquement
+    une requête LLM bloquante encore en cours. `os._exit` contourne le
+    thread non-démon resté actif ; sans lui, ce même thread empêcherait
+    aussi l'arrêt normal de l'interpréteur, indéfiniment."""
+    while not server.should_exit:
+        time.sleep(0.2)
+    time.sleep(delai_s)
+    print(
+        f"[AVERTISSEMENT] Arrêt normal au-delà de {delai_s:.0f}s "
+        "(requête encore en cours) — sortie forcée du process.",
+        flush=True,  # os._exit() ne vide jamais les tampons stdio
+    )
+    os._exit(1)
+
+
 def main() -> None:
     settings = get_settings()  # lit .env + crée les dossiers runtime (data/...)
     base_url = _url_ollama(settings.llm_base_url)
@@ -77,7 +111,15 @@ def main() -> None:
     print(f"  URL       : http://{HOST}:{PORT}/")
     print("=" * 64)
 
-    uvicorn.run("src.api:create_app", factory=True, host=HOST, port=PORT)
+    config = uvicorn.Config("src.api:create_app", factory=True, host=HOST, port=PORT)
+    server = uvicorn.Server(config)
+    surveillant = threading.Thread(
+        target=_surveiller_arret_force,
+        args=(server, DELAI_ARRET_FORCE_S),
+        daemon=True,
+    )
+    surveillant.start()
+    server.run()
 
 
 if __name__ == "__main__":

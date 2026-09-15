@@ -95,12 +95,39 @@ Principes structurants (invariants du projet) :
 | Python | **3.11** (venv du dépôt) — le code cible 3.10+ |
 | [Ollama](https://ollama.com) | serveur local, modèle `qwen3:8b` (`ollama pull qwen3:8b`) |
 | GPU | optionnel — CUDA accélère embeddings/reranking et Ollama ; sinon CPU |
-| Tesseract OCR | requis seulement pour les PDF scannés (`OCR_ENABLED=true`) |
+| Tesseract OCR + Poppler | requis seulement pour les PDF scannés (`OCR_ENABLED=true`, activé par défaut — voir commandes d'installation ci-dessous) |
 | RAM | ~6 Go pour BGE-M3 + reranker chargés en mémoire |
 | Accès réseau sortant | requis pour le **frontend** (React/Babel via `unpkg.com`, polices via `fonts.googleapis.com`) — l'API et le RAG, eux, sont 100 % locaux et fonctionnent sans Internet |
 
 Modèles Hugging Face (`BAAI/bge-m3`, `BAAI/bge-reranker-v2-m3`) : téléchargés
 au premier usage, puis mis en cache.
+
+### Installer Tesseract + Poppler (PDF scannés)
+
+`OCR_ENABLED=true` par défaut : sans ces deux binaires système, l'import d'un
+PDF scanné échoue avec une erreur système (pas une erreur applicative claire).
+`pytesseract` et `pdf2image` (dans `requirements.txt`) sont de simples
+wrappers Python : ils n'installent **pas** ces binaires eux-mêmes.
+
+`OCR_LANGUAGES=fra+ara+eng` par défaut : les paquets de langue française et
+arabe ne sont **pas** inclus dans l'installation de base de Tesseract et
+doivent être installés explicitement.
+
+| OS | Commande |
+|---|---|
+| Ubuntu / Debian | `sudo apt install tesseract-ocr tesseract-ocr-fra tesseract-ocr-ara poppler-utils` |
+| macOS (Homebrew) | `brew install tesseract tesseract-lang poppler` |
+| Windows | Installer [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) (cocher les paquets de langue French/Arabic pendant l'installation) et [Poppler pour Windows](https://github.com/oschwartz10612/poppler-windows/releases/) ; ajouter les deux au `PATH`, ou renseigner `TESSERACT_CMD` dans `.env` si le binaire Tesseract n'est pas sur le `PATH` |
+
+Vérifier l'installation :
+
+```bash
+tesseract --list-langs   # doit lister fra, ara, eng
+pdftoppm -h               # confirme que Poppler est bien sur le PATH
+```
+
+Pour désactiver l'OCR (pas de PDF scanné à traiter) : `OCR_ENABLED=false`
+dans `.env`.
 
 ---
 

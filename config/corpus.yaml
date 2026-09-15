@@ -24,3 +24,17 @@ default:
     statut: succes
   profil_domaine: default
   source: local
+python:
+  cree_le: '2026-09-13T19:37:45+00:00'
+  derniere_ingestion:
+    a: '2026-09-13T19:40:03+00:00'
+    chunks_indexes: 843
+    duree_secondes: 87.7
+    fichiers_en_echec: 0
+    fichiers_ignores_inchanges: 0
+    fichiers_traites: 2
+    fichiers_trouves: 2
+    statut: succes
+  nom: python
+  profil_domaine: python
+  source: managed
