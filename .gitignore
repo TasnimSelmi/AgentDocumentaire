@@ -58,4 +58,10 @@ tests/evaluation/
 
 
 CHANGELOG.md
-scorecard_reference.md
+scorecard_reference.mdscorecard_reference.md
+CHANGELOG.md
+data/
+profiles/
+evaluation/data/
+evaluation/results/
+evaluation/reports/
