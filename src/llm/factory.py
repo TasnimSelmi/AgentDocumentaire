@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from langchain_ollama import ChatOllama
 
-from src.config import get_settings
+from src.config import get_config_technique, get_settings
 
 
 class ErreurConfigurationLLM(RuntimeError):
@@ -48,10 +48,24 @@ def construire_llm() -> ChatOllama:
         else "http://localhost:11434"
     )
 
+    # `client_kwargs` est transmis tel quel par `ChatOllama` à `ollama.Client`
+    # / `ollama.AsyncClient` (langchain_ollama==0.2.2,
+    # `ChatOllama._client_params`), qui les transmet eux-mêmes à
+    # `httpx.Client`/`httpx.AsyncClient` (`ollama.Client.__init__` :
+    # `super().__init__(httpx.Client, host, **kwargs)`). `timeout` est un
+    # paramètre natif `httpx` (délai unique appliqué à connect/read/write/pool
+    # faute de `httpx.Timeout` explicite) — jusqu'ici jamais transmis : sans
+    # ce paramètre, un appel Ollama bloqué ne lève aucune exception, quelle
+    # que soit `ConfigAgent.timeout_secondes` (`config/default.yaml`).
+    # Source de vérité unique : `ConfigAgent.timeout_secondes`, pas une
+    # nouvelle constante.
+    timeout_secondes = get_config_technique().agent.timeout_secondes
+
     return ChatOllama(
         model=modele,
         base_url=base_url,
         temperature=settings.llm_temperature,
         num_predict=settings.llm_max_tokens,
         num_ctx=settings.llm_num_ctx,
+        client_kwargs={"timeout": timeout_secondes},
     )

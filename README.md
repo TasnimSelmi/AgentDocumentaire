@@ -184,6 +184,14 @@ Tout autre corpus obtient automatiquement sa propre collection dérivée de son
 `.env.example` — générique, sans référence à un corpus ou un dataset
 particulier — fait foi.
 
+### 5bis. Changer de modèle
+
+| Ce qu'on veut changer | Où | Impact |
+|---|---|---|
+| **Modèle Ollama** (ex. `qwen3:8b` → `llama3.1:8b`) | `LLM_MODEL` dans `.env`, puis `ollama pull <modèle>` | Aucun code à toucher (`src/llm/factory.py` lit tout depuis `.env`). ⚠️ `qwen3:8b` fait partie de la **configuration gelée de référence** ([docs/DO_NOT_TOUCH.md](docs/DO_NOT_TOUCH.md) §5) : le changer invalide les mesures existantes et impose un nouveau cycle d'évaluation complet (§12) avant mise en production |
+| **Fournisseur LLM** (OpenAI, Anthropic, etc., au lieu d'Ollama) | `src/llm/factory.py` uniquement — c'est **l'unique point d'accès au LLM** du projet (principe #3, §1) | Le fichier refuse aujourd'hui tout `LLM_PROVIDER` différent de `ollama` (garde explicite dans `construire_llm`). Ajouter un fournisseur = brancher un nouveau client LangChain selon `settings.llm_provider` dans cette seule fonction ; aucun autre module ne connaît le fournisseur. Non listé dans DO_NOT_TOUCH.md, mais reste soumis au même principe : nouvelle mesure avant mise en production |
+| **Modèle d'embeddings** (`BAAI/bge-m3`) ou **de reranking** (`BAAI/bge-reranker-v2-m3`) | `EMBEDDING_MODEL` / `RERANKER_MODEL` dans `.env`, mais le code qui les charge (`src/rag/embeddings.py`) est **gelé** ([docs/DO_NOT_TOUCH.md](docs/DO_NOT_TOUCH.md) §1 et §5) | Changer d'embeddings change l'espace vectoriel : **ré-indexation complète obligatoire** de tous les corpus. Si le nouveau modèle produit une dimension de vecteur différente, `config/default.yaml → qdrant.taille_vecteur_dense` (actuellement `1024` pour BGE-M3) doit aussi être mis à jour. À ne faire que dans le cadre d'un cycle d'évaluation complet (§12) |
+
 ---
 
 ## 6. Lancement — une seule commande

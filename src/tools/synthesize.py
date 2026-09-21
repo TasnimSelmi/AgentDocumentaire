@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 from src.llm.common import bloc_profil_domaine, extraire_json_objet, invoquer_llm
 from src.tools.base import ResultatOutil, SourceOutil
@@ -106,14 +106,48 @@ def synthetiser_documents(
     llm: Any,
     profil_domaine: Any | None = None,
     corpus_id: str = "default",
+    strategy: Literal["map_reduce", "contextual", "hybrid"] = "map_reduce",
 ) -> ResultatOutil:
     """
     Point d'entrée SYNTHESIZE. `references` = noms de fichiers explicites du
     signal multi-document (P1.4), résolus DANS LE CORPUS `corpus_id`
     uniquement. Abstention déterministe si la résolution n'est pas fiable —
     jamais de repli vers un search global, jamais un mélange de corpus.
+
+    `strategy` (additif, défaut inchangé) : voir `src.tools.compare.comparer`
+    pour la documentation complète du paramètre — même contrat, même module
+    `src.agent.contextual_strategy` pour `"contextual"`/`"hybrid"`. Non routé
+    par l'agent : n'affecte jamais le comportement par défaut.
     """
     question = " ".join(str(question).split())
+
+    if strategy == "contextual":
+        from src.agent.contextual_strategy import executer_contextual
+
+        return executer_contextual(
+            operation="synthesize",
+            question=question,
+            corpus_id=corpus_id,
+            llm=llm,
+            documents=references,
+            profil_domaine=profil_domaine,
+        )
+
+    if strategy == "hybrid":
+        from src.agent.contextual_strategy import tenter_avec_repli
+
+        return tenter_avec_repli(
+            operation="synthesize",
+            question=question,
+            corpus_id=corpus_id,
+            llm=llm,
+            documents=references,
+            profil_domaine=profil_domaine,
+            repli=lambda: synthetiser_documents(
+                question, references, llm=llm, profil_domaine=profil_domaine,
+                corpus_id=corpus_id, strategy="map_reduce",
+            ),
+        )
 
     resolution = resoudre_cibles(references, corpus_id=corpus_id)
     if resolution.refus is not None:
@@ -177,7 +211,14 @@ def synthetiser_documents(
         )
 
     try:
-        brut = invoquer_llm(llm, systeme=systeme, utilisateur=utilisateur)
+        # `reasoning=False` : même correctif que PLAN/MAP (voir
+        # `multidoc_pipeline.py`, diagnostic Mode B) — REDUCE consomme un
+        # JSON déjà structuré par les MAP, aucun raisonnement libre n'est
+        # nécessaire ; sans ce paramètre, `think` reste au défaut du modèle
+        # sous-jacent (activé pour qwen3), ce qui peut consommer tout
+        # `num_predict` en raisonnement avant d'émettre le JSON de sortie et
+        # renvoyer une réponse vide (voir report.md / diagnostic REDUCE).
+        brut = invoquer_llm(llm, systeme=systeme, utilisateur=utilisateur, reasoning=False)
         objet = extraire_json_objet(brut)
     except Exception as exc:  # noqa: BLE001 — REDUCE raté => abstention, jamais hallucination
         logger.warning("REDUCE SYNTHESIZE échoué : %s", exc)
