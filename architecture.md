@@ -264,7 +264,8 @@ recherche: RapportRecherche, avertissements, citations_hors_perimetre }`.
 
 `SourceCitee.extrait` est **tronqué à 320 caractères** (affichage). Le texte
 complet reste disponible via `recherche.passages[i].texte`. *(Nuance
-importante pour l'évaluation — voir `scorecard_reference.md` §4.)*
+importante pour l'évaluation : un évaluateur doit comparer au texte
+complet, pas à l'extrait.)*
 
 Validation (`src/rag/validation.py`) : une citation syntaxiquement valide qui
 renvoie au **mauvais document** est le pire cas (réponse fausse présentée

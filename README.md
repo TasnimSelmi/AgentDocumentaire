@@ -328,8 +328,7 @@ besoin, jamais nécessaire au fonctionnement normal de l'application :
 | `run_ablation.py` | ablation des leviers de retrieval |
 
 Le harnais **ne modifie ni n'importe** de logique de `src/rag/`, `src/tools/`,
-`src/agent/` : il consomme leurs points d'entrée publics. Dernier scorecard :
-**[`scorecard_reference.md`](scorecard_reference.md)**.
+`src/agent/` : il consomme leurs points d'entrée publics.
 
 ---
 
