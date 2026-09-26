@@ -1,31 +1,31 @@
-# Architecture — RAG V1 + cœur agentique P1
+# Architecture — Agent documentaire (RAG + agent + API multi-corpus + frontend)
 
-> État : socle RAG **gelé** (tag `rag-v1`) ; cœur agentique **candidat au gel
-> P1** (clôture P1.7, 2026-08-30). Ce document décrit le système tel qu'il est
-> réellement implémenté. Les modules gelés sont ceux de
-> [DO_NOT_TOUCH.md](DO_NOT_TOUCH.md).
+> Ce document décrit le système **tel qu'il est réellement implémenté**. Pour
+> l'installation, la configuration et le lancement, voir [README.md](README.md).
 >
-> **Capacités réellement supportées** : SEARCH, SUMMARIZE, CLASSIFY, EXTRACT
-> (mono-document) + COMPARE, SYNTHESIZE (multi-document, 2 à 4 documents
-> explicitement nommés). Contrat de sortie public unique : `AgentResponse`
-> (`src/agent/response.py`, §7.5). Point d'entrée du cœur : `executer_agent`
-> (`src/agent/graph.py`). Façade applicative (P2.1) : `AgentService`
-> (`src/agent/service.py`, §7.7) — c'est elle que les couches API/UI doivent
-> appeler. Voir [P1_CLOTURE.md](P1_CLOTURE.md) pour le statut détaillé
-> (supporté / supporté avec limitation / reporté P2).
+> **Capacités** : SEARCH, SUMMARIZE, CLASSIFY, EXTRACT (mono-document) +
+> COMPARE, SYNTHESIZE (multi-document, 2 à 4 documents explicitement nommés).
+> Contrat de sortie public unique : `AgentResponse` (`src/agent/response.py`,
+> §7.5). Point d'entrée du cœur : `executer_agent` (`src/agent/graph.py`).
+> Façade applicative : `AgentService` (`src/agent/service.py`, §7.7) — c'est
+> elle que les couches API/UI appellent.
 >
-> **Sources documentaires (P2.2, gelé)** : `DocumentSource` /
-> `LocalDocumentSource` / `SnapshotDocumentSource` / `IngestionService`
-> (`src/sources/`, §2.1) — toute origine de documents (dossier local
-> aujourd'hui, API / GED demain) passe par cette couche et par
-> `IngestionService.sync()`, jamais par une modification de `src/rag/**`. Voir
-> [P2.2_SOURCES.md](P2.2_SOURCES.md) et [DO_NOT_TOUCH.md](DO_NOT_TOUCH.md) §4.
+> **Couches, du bas vers le haut** :
 >
-> **API HTTP (P2.3)** : `src/api/` (§7.8) — couche de transport mince
-> (`GET /health`, `POST /query` → `AgentService`, `POST /ingestion` →
-> `IngestionService`). `/query` renvoie le contrat public `AgentResponse` tel
-> quel ; le client ne fournit jamais de chemin filesystem. MVP sans
-> authentification. Voir [P2.3_API.md](P2.3_API.md).
+> | Couche | Emplacement | Section |
+> |---|---|---|
+> | Socle RAG (ingestion, stockage, retrieval, génération) | `src/rag/` | §2–§5 |
+> | Isolation multi-corpus | `src/rag/corpus.py` + `src/config.py` | §2.2 |
+> | Sources documentaires (`local`, `managed`) | `src/sources/` | §2.1 |
+> | Outils de l'agent | `src/tools/` | §6 |
+> | Cœur agentique (graphe LangGraph déterministe) | `src/agent/` | §7 |
+> | API HTTP (FastAPI) | `src/api/` | §7.8 |
+> | Observabilité | `src/observability/` | §7.9 |
+> | Frontend statique | `src/ui/` | §7.10 |
+>
+> Le socle RAG, le cœur agentique et `config/default.yaml` constituent la
+> **configuration de référence** : toute modification de ces modules impose un
+> nouveau cycle d'évaluation complet (voir README §12).
 
 ---
 
@@ -45,6 +45,7 @@ Trois couches de configuration, jamais mélangées (`src/config.py`) :
 | `config/default.yaml` | chunking, OCR, seuils, recherche, Qdrant, agent | `ConfigTechnique` |
 | `config/schemas/<profil>.yaml` | taxonomie, champs de métadonnées, schéma d'extraction | `Profil` |
 | `profiles/domains/<nom>.yaml` | vocabulaire métier pour les prompts | `DomainProfile` (`src/profiling`) |
+| `config/corpus.yaml` | registre des corpus déclarés (état runtime géré par l'API, non versionné) | `ConfigCorpus` |
 
 **Invariant de généricité** : aucun nom de corpus, de société, de fichier ou
 de champ métier n'apparaît dans `src/`. Tout élément spécifique à un domaine
@@ -57,8 +58,8 @@ transite par un YAML.
 Par document :
 
 ```
-découverte (DOCUMENTS_DIR)
-  → hash SHA-256 + déduplication contre le registre (data/vectordb/<...>/registry.json)
+découverte (dossier matérialisé par la source du corpus, voir §2.1)
+  → hash SHA-256 + déduplication contre le registre de fichiers DU corpus (§2.2)
   → extraction de texte (src/rag/loaders.py : pdf, docx, xlsx, pptx, html, txt, md)
       → OCR Tesseract si le texte extrait est sous seuil_texte_vide (PDF scanné)
   → découpage structure-aware (src/rag/chunking.py)
@@ -73,15 +74,15 @@ Puis, globalement : un **rapport qualité** (`data/logs/`) exposant taux de
 remplissage des champs, échecs, fusions d'entités. C'est la boucle
 d'amélioration : ajuster les descriptions du profil YAML, ré-ingérer.
 
-### 2.1 Sources documentaires (P2.2 — `src/sources/`, gelé)
+### 2.1 Sources documentaires (`src/sources/`)
 
 `ingerer(dossier=…)` accepte n'importe quel répertoire : l'origine des
 documents est donc découplée du pipeline **sans** toucher `src/rag/**`.
 
 ```
-origine (dossier local ; API / GED / autre demain)
+origine (dossier local, stockage géré par corpus ; GED / API demain)
    └─ DocumentSource.materialiser()  ──▶  répertoire = snapshot COMPLET (Path)
-        └─ IngestionService.sync(source)  ──▶  ingerer(dossier=…)   [socle gelé]
+        └─ IngestionService.sync(source, corpus_id=…)  ──▶  ingerer(dossier=…)
 ```
 
 - **`DocumentSource`** (contrat public) : une seule opération,
@@ -89,17 +90,56 @@ origine (dossier local ; API / GED / autre demain)
   **toujours un snapshot complet et cohérent** — jamais partiel. Impossibilité
   ⇒ `ErreurSource` **avant** le `yield` (le pipeline n'est pas appelé, l'index
   reste tel quel).
-- **`LocalDocumentSource`** : adaptateur local MVP — le dossier de
-  l'utilisateur *est* le snapshot (pass-through, aucune copie).
-  `IngestionService().sync(LocalDocumentSource(d))` ≡ `ingerer(dossier=d)`.
+- **`LocalDocumentSource`** : le dossier fourni *est* le snapshot
+  (pass-through, aucune copie).
 - **`SnapshotDocumentSource`** : base imposée aux futures sources distantes —
   construit la matérialisation à l'écart, publie **atomiquement** après succès
   **complet**, garde le miroir précédent intact en cas d'échec. Une
   récupération partielle n'est donc **jamais** vue comme une suppression.
-- **`IngestionService.sync()`** : façade d'ingestion P2 — un seul appel à
+- **`IngestionService.sync()`** : façade d'ingestion — un seul appel à
   `ingerer`, options transmises telles quelles, `RapportIngestion` intact.
 
-Détails : [P2.2_SOURCES.md](P2.2_SOURCES.md). Gel : [DO_NOT_TOUCH.md](DO_NOT_TOUCH.md) §4.
+**Sources logiques enregistrées** (`src/api/dependencies.py`,
+`registre_sources_par_defaut`) — le client ne désigne jamais qu'un **nom**,
+jamais un chemin :
+
+| Source | Fabrique | Dossier matérialisé |
+|---|---|---|
+| `local` | `LocalDocumentSource(Settings.documents_dir)` | `DOCUMENTS_DIR`, partagé, historique (corpus `default`) |
+| `managed` | `LocalDocumentSource(dossier_managed_pour_corpus(id))` | `<corpora_dir>/<corpus_id>/documents/`, propre au corpus, alimenté par upload de dossier / import URL (§7.8) |
+
+Ajouter un connecteur d'entreprise = implémenter `DocumentSource` (via
+`SnapshotDocumentSource`) et ajouter une entrée à ce registre — jamais un
+paramètre HTTP, jamais une modification de `src/rag/**`.
+
+### 2.2 Isolation multi-corpus (`src/rag/corpus.py`)
+
+`corpus_id` est le **seul** identifiant qu'un appelant externe fournit. Le
+backend en dérive, ici et nulle part ailleurs :
+
+| Ressource | `default` | autre corpus |
+|---|---|---|
+| Collection Qdrant | `qdrant.nom_collection` (`config/default.yaml`) | `<nom_collection>__<corpus_id>` |
+| Registre de fichiers | `Settings.chemin_registre` (historique) | `<qdrant_path>/registries/<corpus_id>.json` |
+| Profil de domaine | `ACTIVE_DOMAIN_PROFILE` (repli) | `profil_domaine` enregistré pour le corpus (§9) |
+| Source | `local` | déclarée à la création (`local` ou `managed`) |
+
+- `resoudre_corpus(corpus_id)` reconstruit à chaque appel un `ContexteCorpus`
+  immuable (collection, registre, profil, source) — **aucun état global
+  mutable**, sûr entre requêtes concurrentes sur des corpus différents.
+- Le registre des corpus vit dans `config/corpus.yaml` (`src/config.py`,
+  réécrit atomiquement). Absent ⇒ registre réduit au seul corpus `default`.
+- Déclarer un corpus ne crée **aucune** collection : elle est créée à la
+  première ingestion. Le dernier `RapportIngestion` est résumé dans le
+  registre (`enregistrer_rapport_ingestion`) pour dériver le statut affiché
+  par `GET /corpora` sans rejouer l'ingestion.
+- `supprimer_corpus` retire, dans cet ordre, la collection Qdrant, le
+  registre de fichiers, le profil de domaine persisté, puis l'entrée du
+  registre. `default` est **protégé** (`CorpusProtege` → `403`).
+- `corpus_id` circule explicitement de bout en bout :
+  `POST /query {corpus_id}` → `AgentService.query(…, corpus_id=)` →
+  `construire_session(corpus_id=…)` → outils et retrieval scopés à la
+  collection du corpus.
 
 ### Découpage structure-aware
 
@@ -456,9 +496,9 @@ AgentResponse {
 - `EtatGraphe` (`graph_state.py`) : porté par LangGraph ; `session` n'est
   jamais réassignée, seuls ses attributs internes sont mutés.
 
-### 7.7 Façade applicative — `AgentService` (`src/agent/service.py`, P2.1)
+### 7.7 Façade applicative — `AgentService` (`src/agent/service.py`)
 
-Frontière **P1 / P2**. `AgentService` est une couche **mince** au-dessus du
+Frontière cœur / couches applicatives. `AgentService` est une couche **mince** au-dessus du
 point d'entrée public P1 :
 
 ```
@@ -491,46 +531,65 @@ API / UI / connecteurs documentaires
 > `AgentService`, **jamais** LangGraph, `graph.py`, `nodes.py` ni une
 > structure interne du graphe directement.
 
-### 7.8 Couche API HTTP (`src/api/`, P2.3)
+### 7.8 Couche API HTTP (`src/api/`)
 
-Couche de **transport** exposant `AgentService` (§7.7) et `IngestionService`
-(§2.1) en HTTP/JSON. Aucune intelligence documentaire : ni routage, ni
-capacité, ni ingestion, ni résolution documentaire, ni logique Qdrant, ni
-re-normalisation d'`AgentResponse`. Chaque route :
-`validation Pydantic → un appel de service → adaptation HTTP`.
+Couche de **transport** exposant `AgentService` (§7.7), `IngestionService`
+(§2.1), la gestion multi-corpus (§2.2) et le profilage de domaine (§9) en
+HTTP/JSON. Aucune intelligence documentaire : ni routage, ni capacité, ni
+résolution documentaire, ni logique Qdrant, ni re-normalisation
+d'`AgentResponse`. Chaque route : `validation Pydantic → un appel de service
+→ adaptation HTTP`.
 
-```
-Client / UI  →  FastAPI (src/api/**)
-                  ├─ POST /query      → AgentService.query    → AgentResponse.vers_dict()  (tel quel)
-                  ├─ POST /ingestion  → IngestionService.sync → RapportIngestion           (asdict, intact)
-                  └─ GET  /health     → { "status": "ok" }    (liveness pur)
-```
+| Méthode & route | Délègue à | Réponse |
+|---|---|---|
+| `GET /health` | — | `{"status": "ok"}` (liveness pur, ne sonde ni Ollama ni Qdrant) |
+| `POST /query` | `AgentService.query(query, corpus_id=)` | `AgentResponse.vers_dict()` tel quel |
+| `POST /ingestion` | `IngestionService.sync(fabrique(corpus_id), …)` | `RapportIngestion` intact |
+| `GET /corpora` | `lister_resumes_corpus` | liste des corpus + statistiques réelles (Qdrant + registre) |
+| `GET /corpora/{id}` | `resume_corpus` | détail d'un corpus |
+| `POST /corpora` | `declarer_corpus` | `201`, statut `indexation_required` |
+| `DELETE /corpora/{id}` | `supprimer_corpus` | `204` ; `403` pour `default` |
+| `GET /sources` | registre `app.state.sources` | sources réellement enregistrées (`local`, `managed`) |
+| `POST /corpora/{id}/upload` | `uploads.valider_lot` + `ecrire_lot` | fichiers écrits dans le stockage `managed` (n'indexe rien) |
+| `POST /corpora/{id}/import-url` | `url_import.telecharger` | document écrit dans le stockage `managed` (n'indexe rien) |
+| `POST /corpora/{id}/profile` | `suggest_domain_profile` (LLM) | proposition de profil, **non persistée** |
+| `POST /corpora/{id}/profile/validate` | `save_domain_profile` + `mettre_a_jour_corpus` | profil persisté et associé au corpus |
 
-- **`create_app(*, agent_service, ingestion_service, sources)`** : collaborateurs
-  injectables (doublures en test), construits **paresseusement** sinon —
-  importer `src.api` ou appeler `create_app()` ne touche ni Ollama, ni Qdrant,
-  ni le système de fichiers.
-- **`/query`** renvoie **`AgentResponse.vers_dict()` tel quel** (aucun modèle
-  Pydantic miroir). Mapping : `success` / `refusal` → `200` (**un refus métier
-  n'est pas une panne**) ; `error` + `code="requete_invalide"` → `422`
-  (`AgentService` reste l'autorité unique — requête vide/blanche jamais
-  transmise au cœur P1) ; tout autre `error` → `500`, bloc `error` **remplacé**
-  par un message générique (aucun traceback / chemin / secret dans la réponse).
-- **`/ingestion`** résout `source` (nom **logique**) contre un registre backend
-  `nom -> fabrique DocumentSource` (MVP : `"local"` →
-  `LocalDocumentSource(Settings.documents_dir)`). **Le client ne fournit aucun
-  chemin** : `extra="forbid"` → une clé `path` / `dossier` / `racine` = `422`.
-  `inferer` / `nom_profil` non exposés. `ErreurSource` → `503`.
-  `RapportIngestion` renvoyé intact (y compris `fichiers_en_echec > 0` → `200`).
-- **Limitations MVP** : pas d'authentification (`POST /ingestion` mute l'index
-  — ne pas exposer publiquement en l'état) ; ingestion synchrone (requête
-  bloquante) ; `/health` = liveness seul.
-- **Aucune** modification de `src/rag/**`, du cœur P1, de `src/agent/service.py`
-  ni de `src/sources/**`. `tests/api/` (hors ligne, services injectés).
-  Lancement : `uvicorn "src.api:create_app" --factory`. Détails :
-  [P2.3_API.md](P2.3_API.md).
+- **`create_app(*, agent_service, ingestion_service, sources, sink)`** :
+  collaborateurs injectables (doublures en test), construits
+  **paresseusement** sinon — importer `src.api` ou appeler `create_app()` ne
+  touche ni Ollama, ni Qdrant, ni le système de fichiers.
+- **`/query`** : `success` / `refusal` → `200` (**un refus métier n'est pas
+  une panne**) ; `error` + `requete_invalide` → `422` ; tout autre `error` →
+  `500`, bloc `error` **remplacé** par un message générique (aucun traceback /
+  chemin / secret). `corpus_id` inconnu ou mal formé →
+  `error.code="corpus_invalide"`.
+- **`/ingestion`** : la source utilisée est **toujours** celle déclarée pour
+  le corpus ; un `source` fourni différent → `422` (un corpus synchronisé
+  contre deux sources lirait une suppression de documents fantôme).
+  `extra="forbid"` : aucune clé de chemin acceptée. `ErreurSource` → `503`.
+  `fichiers_en_echec > 0` reste un `200`.
+- **Upload** : lot validé **intégralement avant toute écriture** (extensions
+  de `ingestion.extensions_supportees`, taille par fichier `taille_max_mo`,
+  taille totale, nombre de fichiers, chemins relatifs anti-traversée —
+  absolu, `..`, hors périmètre) ; un seul fichier refusé ⇒ rien n'est écrit.
+  Additif, jamais un remplacement.
+- **Import URL** : http(s) uniquement, résolution DNS contrôlée (plages
+  privées / internes refusées — anti-SSRF), redirections bornées et
+  revalidées, taille bornée, format supporté ; aucun détail réseau brut
+  exposé au client.
+- Upload / import ne sont autorisés que pour un corpus de source `managed`
+  (`422` sinon), et **n'indexent jamais** : `POST /ingestion` reste l'unique
+  porte d'entrée d'indexation.
+- **Frontend** : `src/ui/` est monté sous `/ui` (`StaticFiles`) et `/`
+  redirige vers `Gestion des corpus.html` — un process, un port, une origine.
+- **Limitations** : pas d'authentification (`POST /ingestion`, upload,
+  import et `DELETE` mutent l'état — ne pas exposer publiquement) ; CORS
+  ouvert (`allow_origins=["*"]`, sans credentials) ; ingestion synchrone.
+- Lancement : `python scripts/run.py` (vérifie Ollama et le modèle, crée les
+  dossiers runtime) ou `uvicorn "src.api:create_app" --factory`.
 
-### 7.9 Observabilité transverse (`src/observability/`, P2.4)
+### 7.9 Observabilité transverse (`src/observability/`)
 
 Couche de **traçage** transverse. Trace les exécutions agent et les ingestions
 — durée, statut, capacité, documents / citations, erreurs techniques
@@ -541,7 +600,7 @@ strictement inchangé ; aucune trace interne du graphe LangGraph exposée.
 ```
 HTTP → CorrelationMiddleware (ASGI pur) → routes FastAPI (inchangées)
      → InstrumentedAgentService / InstrumentedIngestionService
-     → AgentService / IngestionService (P2.1 / P2.2) → cœur gelé
+     → AgentService / IngestionService → cœur
 
   Instrumented*Service ─▶ ObservabilityEvent ─▶ TraceSink
                                                  ├─ LoggingTraceSink → JSON stdout
@@ -575,7 +634,7 @@ HTTP → CorrelationMiddleware (ASGI pur) → routes FastAPI (inchangées)
   public (classe `BACKEND_AUDIT`).
 - **Erreurs HTTP** : `src/api/errors.py` reste l'**unique** autorité. Le seul
   `@app.exception_handler(Exception)` émet `http_unhandled_error` puis renvoie
-  **exactement** le même `500` générique P2.3 ; `ErreurSource` → même `503`.
+  **exactement** le même `500` générique que §7.8 ; `ErreurSource` → même `503`.
 - **`install_observability(app, *, sink=None)`** : installe le middleware,
   enveloppe `app.state.agent_service` / `.ingestion_service`, pose un
   `ObservabilityRuntime` sur `app.state.observability`. **Aucun global
@@ -583,41 +642,53 @@ HTTP → CorrelationMiddleware (ASGI pur) → routes FastAPI (inchangées)
   Piloté par `Settings.observability_enabled` / `observability_emit_start`
   (aucun `os.getenv` dans `src/observability`). `structlog` confiné à
   `LoggingTraceSink`. Extensible vers OpenTelemetry / ELK / Loki / Splunk via
-  un autre `TraceSink` — **non implémenté**. Détails :
-  [P2.4_OBSERVABILITY.md](P2.4_OBSERVABILITY.md).
+  un autre `TraceSink` — **non implémenté**.
 
 ### 7.10 Frontend statique (`src/ui/`)
 
-Frontend **client HTTP pur** : trois pages HTML autonomes (aucun framework,
-aucun build) — `Gestion des corpus.html`, `Agent Documentaire.html`,
-`Connexion.html` — qui ne parlent qu'à l'API FastAPI via `fetch`. Aucune
-logique agentique, aucun accès Qdrant/Ollama, aucune ingestion directe,
-aucune duplication du routage.
+Frontend **client HTTP pur** : trois pages HTML autonomes en HTML/CSS/JS
+natifs (aucun framework, aucun build, aucune dépendance JS externe) —
+`Gestion des corpus.html`, `Agent Documentaire.html`, `Connexion.html` — qui
+ne parlent qu'à l'API FastAPI via `fetch`. Aucune logique agentique, aucun
+accès Qdrant/Ollama, aucune ingestion directe, aucune duplication du routage.
 
 ```
-Navigateur → src/ui/*.html (fetch API_BASE) → FastAPI (src/api/**)
-           → AgentService / IngestionService → cœur gelé
+Navigateur → /ui/*.html (fetch, même origine) → FastAPI (src/api/**)
+           → AgentService / IngestionService / corpus → cœur
 ```
 
-- **Servies par FastAPI elle-même** : `src/api/app.py` monte `src/ui/` sous
-  `/ui` (`StaticFiles`) et redirige `/` vers la page d'accueil — un seul
-  process, un seul port, une seule origine (voir `scripts/run.py`).
-- **`Gestion des corpus.html`** : liste/création/suppression de corpus,
-  upload de dossier, import URL, synchronisation (`POST /ingestion`),
-  proposition/validation de profil de domaine. Lien vers l'agent :
-  `Agent Documentaire.html?corpus_id=<id>`.
-- **`Agent Documentaire.html`** : interrogation (`POST /query`), affichage
-  sourcé (SUCCESS/PARTIAL/REFUSAL/ERROR), historique de session **local à
-  la page** (état JS en mémoire, borné à 12 entrées, non persisté) — relire
-  une entrée ne refait jamais d'appel `/query`.
-- **`Connexion.html`** : page de démonstration, **non branchée** à un
-  backend d'authentification (aucun appel réseau, formulaire simulé) — voir
-  §10 de la checklist de livraison (`docs/DO_NOT_TOUCH.md` §4ter).
+- **`Gestion des corpus.html`** (page d'accueil) : liste / création /
+  suppression de corpus, upload de dossier, import URL, synchronisation
+  (`POST /ingestion`), proposition puis validation du profil de domaine. Lien
+  vers l'agent : `Agent Documentaire.html?corpus_id=<id>`.
+- **`Agent Documentaire.html`** : interrogation (`POST /query` avec
+  `corpus_id`), affichage sourcé (SUCCESS / PARTIAL / REFUSAL / ERROR),
+  historique de session **local à la page** (état JS en mémoire, borné à 12
+  entrées, non persisté) — relire une entrée ne refait jamais d'appel
+  `/query`.
+- **`Connexion.html`** : page de démonstration, **non branchée** à un backend
+  d'authentification (aucun appel réseau, formulaire simulé).
 - Le backend n'a **aucune** dépendance vers `src/ui/` : frontend remplaçable
-  sans toucher à l'API. Dépendance réseau au chargement (React/Babel via
-  `unpkg.com`, polices via `fonts.googleapis.com`) — un poste sans sortie
-  Internet ne peut pas afficher les pages, même si l'API reste locale.
-  Lancement unique : `python scripts/run.py` → `http://127.0.0.1:8000/`.
+  sans toucher à l'API. Seule dépendance réseau externe : les polices Google
+  Fonts (chargement des pages sans Internet : polices de repli).
+
+### 7.11 Stratégie « Contextual RAG » (`src/agent/contextual_strategy.py`, opt-in)
+
+Alternative **additive** au pipeline MAP → REDUCE pour COMPARE / SYNTHESIZE /
+SUMMARIZE : retrieval hybride existant (`rechercher_passages`, cloisonné aux
+documents nommés, jamais de repli global) sous un budget de caractères
+strict, puis **un seul** appel LLM.
+
+- `comparer(…, strategy=…)` / `synthetiser(…, strategy=…)` acceptent
+  `"map_reduce"` (**défaut, chemin de production**), `"contextual"` ou
+  `"hybrid"` ; la variante SUMMARIZE est `resumer_contextuel(…)`.
+- **Non routée** : `nodes.py` appelle toujours les outils sans `strategy=`.
+  La stratégie n'est atteignable que par un appel explicite (benchmark,
+  tests). L'activer en production est une décision séparée, soumise à un
+  cycle d'évaluation complet.
+- Même contrat de citation `[S_]` que la génération ; appel LLM avec
+  `reasoning=False` (le raisonnement `<think>` de qwen3 ne consomme pas le
+  budget `num_predict`).
 
 ---
 
@@ -625,7 +696,11 @@ Navigateur → src/ui/*.html (fetch API_BASE) → FastAPI (src/api/**)
 
 **Point d'accès unique.** `factory.construire_llm()` → `ChatOllama` (LangChain)
 paramétré depuis `Settings` (`llm_model`, `llm_temperature`,
-`llm_num_ctx`, `num_predict`). `common.py` : helpers d'invocation, extraction
+`llm_num_ctx`, `num_predict`) et d'un **timeout HTTP borné**
+(`client_kwargs={"timeout": agent.timeout_secondes}`, `config/default.yaml`) —
+un appel Ollama bloqué ne peut plus immobiliser indéfiniment une requête.
+Les appels dont la sortie est budgétée (PLAN / MAP / REDUCE de COMPARE et
+SYNTHESIZE, stratégie contextuelle) passent `reasoning=False`. `common.py` : helpers d'invocation, extraction
 de JSON, et **retrait systématique des blocs `<think>…</think>`** (qwen3 émet
 un raisonnement avant sa réponse) de tout texte destiné à l'utilisateur ou
 réinjecté dans un prompt.
@@ -642,9 +717,15 @@ en un `DomainProfile` validé via le LLM, **sans lire aucun document** et sans
 toucher Qdrant/embeddings/retrieval. Suggestion et persistance séparées.
 CLI : `python -m src.profiling.cli {suggest|list|show|delete}`.
 
-Le `DomainProfile` actif (`ACTIVE_DOMAIN_PROFILE`) n'injecte que du
-**vocabulaire métier** dans les prompts de génération — il ne modifie ni le
-retrieval ni le routage.
+Via l'API : `POST /corpora/{id}/profile` (proposition, non persistée) puis
+`POST /corpora/{id}/profile/validate` (persistance sous
+`profiles/domains/<corpus_id>.yaml` et association au corpus dans
+`config/corpus.yaml`). Il n'existe **aucun** profil actif global mutable :
+chaque requête lit le profil de SON corpus (`construire_session`) ; le
+corpus `default` retombe sur `ACTIVE_DOMAIN_PROFILE`.
+
+Le profil n'injecte que du **vocabulaire métier** dans les prompts de
+génération — il ne modifie ni le retrieval ni le routage.
 
 ---
 
@@ -652,7 +733,9 @@ retrieval ni le routage.
 
 | Question | Répond |
 |---|---|
-| D'où viennent les documents à ingérer ? | `sources/*.py` (`DocumentSource`, snapshot complet) |
+| D'où viennent les documents à ingérer ? | `sources/*.py` (`DocumentSource`, snapshot complet) + registre `api/dependencies.py` |
+| Quelle collection / quel registre / quel profil pour ce corpus ? | `rag/corpus.py` (`resoudre_corpus`) + `config.py` (`config/corpus.yaml`) |
+| Valider un upload / un import URL ? | `api/uploads.py` / `api/url_import.py` |
 | Lancer une ingestion depuis une source ? | `sources/service.py` (`IngestionService.sync`) |
 | Comment couper un document ? | `chunking.py` |
 | Comment vectoriser / reranker ? | `embeddings.py` |
@@ -668,7 +751,8 @@ retrieval ni le routage.
 | Exposer une capacité comme outil ? | `tools/*.py` |
 | Contrat de sortie unique pour un consommateur externe ? | `agent/response.py` (`AgentResponse`, déterministe) |
 | Exposer les façades en HTTP/JSON ? | `api/**` (transport, validation, mapping HTTP) |
+| Stratégie en un appel LLM (expérimentale, non routée) ? | `agent/contextual_strategy.py` |
 | Tracer requêtes agent / ingestions (durée, statut, corrélation) ? | `observability/**` (`CorrelationMiddleware`, `Instrumented*Service`, `TraceSink`) |
 | Interface web pour poser une question / lancer une ingestion ? | `ui/**` (pages HTML statiques → `fetch` HTTP ; aucun accès direct au cœur), servies par `src/api/app.py` |
 | Quel modèle LLM, comment l'appeler ? | `llm/factory.py` + `llm/common.py` |
-| Mesurer la qualité ? | `evaluation/` (jamais `src/`) |
+| Mesurer la qualité ? | `evaluation/` (local, non versionné — jamais `src/`) |

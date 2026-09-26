@@ -12,11 +12,17 @@ __pycache__/
 profiles/
 data/
 
+# Registre des corpus (config/corpus.yaml) : état runtime géré par l'API
+# (POST/DELETE /corpora), jamais un fichier de config statique à livrer —
+# voir README §5. Absent -> src/config.py::get_registre_corpus() retombe
+# nativement sur un seul corpus "default" vide, sans aucune donnée de dev.
+config/corpus.yaml
 
 
-# Notes d'avancement locales uniquement — la doc de référence du dépôt
-# (architecture.md, DO_NOT_TOUCH.md, P1_CLOTURE.md, P2.2_SOURCES.md, …) reste versionnée.
-docs/avancement/
+
+# Documentation interne locale (notes de phases, gel, clôtures) — non versionnée.
+# La doc de référence livrée est README.md + architecture.md à la racine.
+/docs/
 
 
 # Évaluation locale : le dossier evaluation/ (scripts, datasets, rapports)

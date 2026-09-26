@@ -13,16 +13,6 @@ d'extraction et vocabulaire métier proviennent tous de fichiers de
 configuration (`config/schemas/*.yaml`, `profiles/domains/*.yaml`). Aucun nom
 de corpus, de société ou de champ métier n'est codé en dur.
 
-> ## Statut : socle RAG gelé, couche produit (API + multi-corpus + frontend) livrée
->
-> Le socle RAG (ingestion, retrieval, génération, outils, cœur agentique) est
-> **stable et gelé** — voir **[docs/DO_NOT_TOUCH.md](docs/DO_NOT_TOUCH.md)**
-> pour la liste exacte des modules à ne pas modifier sans un cycle
-> d'évaluation complet. Au-dessus : API FastAPI multi-corpus, sources
-> documentaires (upload/import URL), profilage de domaine, observabilité, et
-> un frontend statique — voir §14 pour les limitations connues et §15 pour ce
-> qui reste hors périmètre (P3).
-
 ---
 
 ## 1. Architecture en un coup d'œil
@@ -57,7 +47,7 @@ de corpus, de société ou de champ métier n'est codé en dur.
                  └──────────────────────────────────────────────────────────────────────┘
 ```
 
-Détails : **[docs/architecture.md](docs/architecture.md)**.
+Détails : **[architecture.md](architecture.md)**.
 
 Principes structurants (invariants du projet) :
 
@@ -157,7 +147,7 @@ Trois niveaux, volontairement séparés (`src/config.py`) :
 | Fichier | Rôle | Varie selon |
 |---|---|---|
 | `.env` | secrets, chemins, choix des modèles | la machine |
-| `config/default.yaml` | chunking, OCR, seuils, recherche, Qdrant, agent | le réglage (**gelé**, voir DO_NOT_TOUCH §5) |
+| `config/default.yaml` | chunking, OCR, seuils, recherche, Qdrant, agent | le réglage (**gelé**, configuration de référence) |
 | `config/schemas/<profil>.yaml` | taxonomie, métadonnées, schéma d'extraction | le domaine |
 | `profiles/domains/<nom>.yaml` | vocabulaire métier injecté aux prompts | le domaine |
 | `config/corpus.yaml` | registre des corpus déclarés (multi-corpus) | l'usage — géré par l'API, pas à éditer à la main |
@@ -188,9 +178,9 @@ particulier — fait foi.
 
 | Ce qu'on veut changer | Où | Impact |
 |---|---|---|
-| **Modèle Ollama** (ex. `qwen3:8b` → `llama3.1:8b`) | `LLM_MODEL` dans `.env`, puis `ollama pull <modèle>` | Aucun code à toucher (`src/llm/factory.py` lit tout depuis `.env`). ⚠️ `qwen3:8b` fait partie de la **configuration gelée de référence** ([docs/DO_NOT_TOUCH.md](docs/DO_NOT_TOUCH.md) §5) : le changer invalide les mesures existantes et impose un nouveau cycle d'évaluation complet (§12) avant mise en production |
+| **Modèle Ollama** (ex. `qwen3:8b` → `llama3.1:8b`) | `LLM_MODEL` dans `.env`, puis `ollama pull <modèle>` | Aucun code à toucher (`src/llm/factory.py` lit tout depuis `.env`). ⚠️ `qwen3:8b` fait partie de la **configuration gelée de référence** : le changer invalide les mesures existantes et impose un nouveau cycle d'évaluation complet (§12) avant mise en production |
 | **Fournisseur LLM** (OpenAI, Anthropic, etc., au lieu d'Ollama) | `src/llm/factory.py` uniquement — c'est **l'unique point d'accès au LLM** du projet (principe #3, §1) | Le fichier refuse aujourd'hui tout `LLM_PROVIDER` différent de `ollama` (garde explicite dans `construire_llm`). Ajouter un fournisseur = brancher un nouveau client LangChain selon `settings.llm_provider` dans cette seule fonction ; aucun autre module ne connaît le fournisseur. Non listé dans DO_NOT_TOUCH.md, mais reste soumis au même principe : nouvelle mesure avant mise en production |
-| **Modèle d'embeddings** (`BAAI/bge-m3`) ou **de reranking** (`BAAI/bge-reranker-v2-m3`) | `EMBEDDING_MODEL` / `RERANKER_MODEL` dans `.env`, mais le code qui les charge (`src/rag/embeddings.py`) est **gelé** ([docs/DO_NOT_TOUCH.md](docs/DO_NOT_TOUCH.md) §1 et §5) | Changer d'embeddings change l'espace vectoriel : **ré-indexation complète obligatoire** de tous les corpus. Si le nouveau modèle produit une dimension de vecteur différente, `config/default.yaml → qdrant.taille_vecteur_dense` (actuellement `1024` pour BGE-M3) doit aussi être mis à jour. À ne faire que dans le cadre d'un cycle d'évaluation complet (§12) |
+| **Modèle d'embeddings** (`BAAI/bge-m3`) ou **de reranking** (`BAAI/bge-reranker-v2-m3`) | `EMBEDDING_MODEL` / `RERANKER_MODEL` dans `.env`, mais le code qui les charge (`src/rag/embeddings.py`) est **gelé** | Changer d'embeddings change l'espace vectoriel : **ré-indexation complète obligatoire** de tous les corpus. Si le nouveau modèle produit une dimension de vecteur différente, `config/default.yaml → qdrant.taille_vecteur_dense` (actuellement `1024` pour BGE-M3) doit aussi être mis à jour. À ne faire que dans le cadre d'un cycle d'évaluation complet (§12) |
 
 ---
 
@@ -272,7 +262,7 @@ Deux sources logiques, jamais un chemin fourni par le client :
 `GET /sources` liste les sources réellement enregistrées côté backend.
 Ajouter un connecteur d'entreprise (GED, SharePoint, API) = implémenter le
 contrat `DocumentSource` (`src/sources/base.py`) — voir
-[docs/P2.2_SOURCES.md](docs/P2.2_SOURCES.md) — jamais une modification du
+[architecture.md](architecture.md) §2.1 — jamais une modification du
 socle RAG.
 
 ---
@@ -316,7 +306,7 @@ scripts/
   demo_agent.py         démo CLI de l'agent complet
 test_rag.py            comparateur de réponses réutilisé par evaluation/ (ne pas déplacer)
 wheels/                cache d'install hors ligne, optionnel (git-ignored)
-docs/                  architecture.md, DO_NOT_TOUCH.md, P2.2/P2.3/P2.4
+architecture.md        architecture détaillée (couches, contrats, frontières)
 CHANGELOG.md           historique des versions
 ```
 
@@ -396,6 +386,6 @@ réelle :
    (ex. `GET/POST /conversations`) et un modèle de stockage encore à définir ;
    ne pas anticiper cette persistance côté frontend avant que (1) existe.
 
-Aucun de ces chantiers ne doit modifier les modules listés dans
-[docs/DO_NOT_TOUCH.md](docs/DO_NOT_TOUCH.md) sans un cycle d'évaluation complet
+Aucun de ces chantiers ne doit modifier le socle RAG ni le cœur agentique
+(voir [architecture.md](architecture.md)) sans un cycle d'évaluation complet
 et une nouvelle version de socle.
