@@ -71,3 +71,8 @@ profiles/
 evaluation/data/
 evaluation/results/
 evaluation/reports/
+
+# Supports de présentation et corpus de démo — locaux, non versionnés
+/presentation/
+/demo/
+/demo_corpus_fr_transformation_numerique/
