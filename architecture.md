@@ -292,7 +292,7 @@ supposée, inventée ou appelée.
 | `search` | `retrieval.rechercher_passages` | — | recherche hybride complète |
 | `summarize` | `retrieval.charger_document` (lecture pure, **pas** de recherche) | 1..N documents entiers → résumé map-reduce borné | résume `ContexteOutil.sources` déjà récupérées |
 | `classify` | idem | document entier → **vote majoritaire absolu** par lots, sinon abstention | classe le contexte existant |
-| `extract` | idem | document entier → **déduplication** des valeurs par lots (jamais un vote), toutes les valeurs distinctes sourcées conservées | Cas B conservé dans l'outil mais **plus jamais atteint par le graphe** depuis P1.6 (voir §7.3) |
+| `extract` | idem | document entier → **déduplication** des valeurs par lots (jamais un vote), toutes les valeurs distinctes sourcées conservées | extrait des passages retrouvés d'un document (`document=<id>`) — atteint quand la recherche retient plusieurs documents (P1.8, voir §7.3) |
 | `compare` | `multidoc_pipeline` (`catalogue.par_identifiant` + `charger_document`) | 2..4 documents nommés → MAP par document → REDUCE inter-document | — (jamais de mode contextuel) |
 | `synthesize` | idem | 2..4 documents nommés → MAP par document → REDUCE transversal | — |
 
@@ -391,29 +391,35 @@ anticipé si `stagnation` (le score de pertinence ne bouge plus). Budget
 
 ### 7.3 Désignation du document — SUMMARIZE / CLASSIFY / EXTRACT
 
-Chaque nœud résout d'abord un `PerimetreDocumentaire` via `resoudre_document`
-(résolution **par identité**, jamais une recherche de contenu) :
+Le nom exact d'un fichier n'est **jamais une précondition** (P1.8). Les trois
+nœuds partagent `_cibler_documents` (`src/agent/nodes.py`) : un document
+désigné par la requête reste prioritaire ; sinon la **recherche existante**
+(outil `search`) désigne les documents pertinents, et seuls les documents
+réellement retrouvés sont traités et cités.
 
-| Situation | SUMMARIZE / CLASSIFY | EXTRACT (depuis P1.6, défaut EX-03) |
-|---|---|---|
-| 1 document résolu de façon **unique et fiable** (`perimetre.contraignant`, une seule valeur) | mode « document complet » | mode « document complet » |
-| requête vise un document mais résolution **non fiable** (`compatible` / `ambigu` / `score_insuffisant`) | **refus déterministe**, sans appeler l'outil ni `search` | **refus déterministe**, idem |
-| **aucune** référence documentaire fiable dans la requête | mode contextuel historique (`ContexteOutil.sources`) ; jamais de document arbitraire | **refus déterministe** — plus aucun repli `search` global → `extract(document=None)` |
+| Situation | Documents retenus | SUMMARIZE | CLASSIFY / EXTRACT |
+|---|---|---|---|
+| `resoudre_document` désigne **un** document de façon fiable | ce document, sans `search` | document complet | document complet |
+| `resoudre_document` désigne **plusieurs** documents (`compatible`) | ces documents (≤ 3), sans `search` | documents complets, un seul résumé | un appel par document (complet), résultats assemblés |
+| aucun document désigné de façon fiable (`aucun`, `ambigu`, `score_insuffisant`, erreur) | documents retrouvés par `search` : meilleur passage ≥ `SEUIL_PERTINENCE_MINIMALE` **et** ≥ 0,5 × meilleur score, ≤ 3 | 1 document : complet ; plusieurs : résumé des passages retrouvés | 1 document : complet ; plusieurs : un appel par document sur ses passages retrouvés (`document=<id>`) |
+| `search` ne retrouve **rien** de pertinent | — | **refus** demandant de préciser | **refus** demandant de préciser |
 
-EXTRACT diverge **volontairement** de CLASSIFY/SUMMARIZE : le repli contextuel
-transformait une recherche multi-document en extraction structurée implicite
-dès que le top-k ne faisait ressortir qu'un seul document (choix de périmètre
-par convenance, non déterministe d'un corpus à l'autre). Depuis P1.6, EXTRACT
-n'extrait que sur un périmètre résolu de façon unique et fiable.
+Traçabilité : trace `mode` (`document_complet`, `documents_nommes`,
+`cible_par_recherche`, `aucun_document_pertinent`) et `documents_cibles` ;
+`AgentResponse.metadata.documents_resolus` porte les documents traités. En
+mode `cible_par_recherche`, un avertissement nomme les documents retenus par
+la recherche. Résultats multi-documents de CLASSIFY/EXTRACT : un par document
+(`donnees.resultats_par_document`), citations préfixées `D<n>` (`D1S2`).
 
-*Limitation connue* : `resoudre_document` ne distingue pas structurellement
-« document nommé mais absent du catalogue » d'« aucune référence
-documentaire » — les deux retombent sur `statut="aucun"` /
-`raison="aucune_correspondance"`. Conséquence : un document nommé mais absent
-donne, pour SUMMARIZE/CLASSIFY, un refus au message générique
-(« utilise d'abord search ») plutôt que « document introuvable ». Refus
-toujours **sûr** (aucune hallucination, aucun document substitué) ; seule la
-qualité du message est en cause. Backlog P2.
+*Compromis assumé* : P1.8 remplace l'invariant P1.6 (EX-03), qui refusait
+toute extraction sans document nommé. Le choix du périmètre dépend du
+classement de la recherche. Il n'est plus silencieux : les documents retenus
+sont toujours nommés dans la réponse. Un document nommé mais absent de
+l'index n'est plus refusé : la recherche peut retenir un document proche,
+nommé dans l'avertissement (cas CQuAE CL-03).
+
+*Non couvert* : les désignations temporelles (« le rapport ajouté
+récemment ») — la résolution n'exploite pas la date d'ingestion.
 
 ### 7.4 Branches COMPARE / SYNTHESIZE (`src/agent/multidoc_pipeline.py`, P1.5)
 

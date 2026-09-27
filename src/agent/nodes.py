@@ -727,326 +727,409 @@ def _resoudre_perimetre_document(requete: str, corpus_id: str = "default") -> tu
         return None, "erreur"
 
 
+# ---------------------------------------------------------------------------
+# Ciblage documentaire partagé par SUMMARIZE / CLASSIFY / EXTRACT
+# ---------------------------------------------------------------------------
+#
+# Le nom exact d'un fichier n'est JAMAIS une précondition. Un document désigné
+# de façon fiable par la requête reste prioritaire (mode document complet) ;
+# sinon, la recherche existante (outil `search`, donc `src.rag.retrieval`,
+# non modifié) désigne les documents pertinents. Seuls les documents
+# réellement retrouvés sont traités, et la réponse ne cite que leurs
+# passages. Une précision n'est demandée que si la recherche ne retrouve
+# aucun document pertinent.
+
+# Nombre maximal de documents traités lorsque plusieurs correspondent :
+# borne le coût (un appel d'outil par document pour CLASSIFY / EXTRACT) et
+# la taille de la réponse.
+MAX_DOCUMENTS_CIBLES = 3
+
+# Un document retrouvé par la recherche n'est retenu que si son meilleur
+# passage atteint cette fraction du meilleur score de la recherche (en plus
+# de `SEUIL_PERTINENCE_MINIMALE`) : écarte les documents qui n'apparaissent
+# qu'en queue de top-k. Choix de conception générique, non calibré sur un
+# corpus particulier.
+RATIO_PERTINENCE_DOCUMENT = 0.5
+
+# "document_complet" : valeur historique de la trace, conservée pour ses
+# consommateurs (harnais d'évaluation).
+MODE_DOCUMENT_NOMME = "document_complet"
+MODE_DOCUMENTS_NOMMES = "documents_nommes"
+MODE_CIBLE_PAR_RECHERCHE = "cible_par_recherche"
+MODE_AUCUN_DOCUMENT_PERTINENT = "aucun_document_pertinent"
+
+
+@dataclass(frozen=True)
+class DocumentCible:
+    """Document retenu : `identifiant` est transmis aux outils, `libelle` affiché."""
+
+    identifiant: str
+    libelle: str
+
+
+@dataclass(frozen=True)
+class CiblageDocumentaire:
+    """
+    Documents sur lesquels exécuter SUMMARIZE / CLASSIFY / EXTRACT.
+
+    ``mode`` vaut :
+        - ``document_complet``         : un document désigné de façon fiable ;
+        - ``documents_nommes``         : plusieurs documents désignés (statut
+          ``compatible`` du résolveur), tous retenus ;
+        - ``cible_par_recherche``      : documents désignés par la recherche ;
+        - ``aucun_document_pertinent`` : la recherche n'a rien retrouvé.
+    """
+
+    mode: str
+    documents: tuple[DocumentCible, ...] = ()
+    statut_resolution: str = ""
+
+    @property
+    def libelles(self) -> tuple[str, ...]:
+        return tuple(document.libelle for document in self.documents)
+
+    @property
+    def identifiants(self) -> tuple[str, ...]:
+        return tuple(document.identifiant for document in self.documents)
+
+    @property
+    def document_demande(self) -> str | None:
+        """Identifiant du document unique désigné par la requête, sinon None."""
+        return self.documents[0].identifiant if self.mode == MODE_DOCUMENT_NOMME else None
+
+    @property
+    def document_complet(self) -> bool:
+        """
+        Vrai si les documents sont traités en entier : désignés par la
+        requête, ou document unique retrouvé par la recherche. Plusieurs
+        documents retrouvés par la recherche : seuls leurs passages
+        retrouvés sont traités (réponse ciblée sur la demande, coût borné).
+        """
+        return self.mode != MODE_CIBLE_PAR_RECHERCHE or len(self.documents) == 1
+
+
+def _documents_retrouves(session: SessionAgent, requete: str) -> tuple[DocumentCible, ...]:
+    """
+    Documents désignés par la recherche, du plus au moins pertinent.
+
+    Réutilise les preuves déjà présentes si une recherche a déjà eu lieu dans
+    cette session ; sinon exécute `search` via le registre (les passages
+    rejoignent `ContexteOutil.sources`, donc la trace et les citations).
+    Chaque document est noté par le score de son meilleur passage
+    (`Passage.score_final`) ; ne sont retenus que ceux qui dépassent
+    `SEUIL_PERTINENCE_MINIMALE` et `RATIO_PERTINENCE_DOCUMENT` × meilleur
+    score, dans la limite de `MAX_DOCUMENTS_CIBLES`. Déterministe pour une
+    recherche donnée.
+    """
+    if not session.a_des_preuves:
+        session.executer_outil("search", requete=requete)
+
+    # Passages du dernier `RapportRecherche` (scores de reranking) ; à défaut,
+    # sources déjà présentes dans le contexte (`SourceOutil.score`).
+    rapport = session.contexte.dernier_rapport_recherche
+    preuves = list(getattr(rapport, "passages", None) or session.contexte.sources)
+
+    meilleurs: dict[str, tuple[float, str]] = {}
+    for preuve in preuves:
+        identifiant = preuve.doc_id or preuve.nom_fichier or preuve.source
+        if not identifiant:
+            continue
+        score = float(
+            (preuve.score_final if hasattr(preuve, "score_final") else preuve.score) or 0.0
+        )
+        libelle = preuve.nom_fichier or preuve.source or preuve.doc_id
+        if identifiant not in meilleurs or score > meilleurs[identifiant][0]:
+            meilleurs[identifiant] = (score, libelle)
+
+    if not meilleurs:
+        return ()
+
+    score_max = max(score for score, _ in meilleurs.values())
+    seuil = max(SEUIL_PERTINENCE_MINIMALE, RATIO_PERTINENCE_DOCUMENT * score_max)
+    classes = sorted(meilleurs.items(), key=lambda item: -item[1][0])
+    return tuple(
+        DocumentCible(identifiant=identifiant, libelle=libelle)
+        for identifiant, (score, libelle) in classes
+        if score >= seuil
+    )[:MAX_DOCUMENTS_CIBLES]
+
+
+def _cibler_documents(session: SessionAgent, requete: str) -> CiblageDocumentaire:
+    """
+    Détermine le ou les documents à traiter, sans jamais exiger de nom exact.
+
+    1. Résolution documentaire fiable (`perimetre.contraignant`) : le ou les
+       documents désignés, sans recherche (au plus `MAX_DOCUMENTS_CIBLES`).
+    2. Sinon (aucune référence, référence ambiguë ou sous le seuil) : les
+       documents retrouvés par la recherche (`_documents_retrouves`).
+    3. Recherche sans résultat pertinent : `aucun_document_pertinent`.
+    """
+    perimetre, statut = _resoudre_perimetre_document(
+        requete, corpus_id=session.contexte.corpus_id
+    )
+
+    if perimetre is not None and perimetre.contraignant:
+        valeurs = perimetre.valeurs_filtre[:MAX_DOCUMENTS_CIBLES]
+        libelles = perimetre.libelles if len(perimetre.libelles) == len(perimetre.valeurs_filtre) else ()
+        documents = tuple(
+            DocumentCible(identifiant=valeur, libelle=libelles[i] if libelles else valeur)
+            for i, valeur in enumerate(valeurs)
+        )
+        mode = MODE_DOCUMENT_NOMME if len(documents) == 1 else MODE_DOCUMENTS_NOMMES
+        return CiblageDocumentaire(mode=mode, documents=documents, statut_resolution=statut)
+
+    documents = _documents_retrouves(session, requete)
+    if not documents:
+        return CiblageDocumentaire(mode=MODE_AUCUN_DOCUMENT_PERTINENT, statut_resolution=statut)
+    return CiblageDocumentaire(
+        mode=MODE_CIBLE_PAR_RECHERCHE, documents=documents, statut_resolution=statut
+    )
+
+
+def _refus_aucun_document(session: SessionAgent, outil: str) -> ResultatOutil:
+    """Seul cas où une précision est demandée : rien de pertinent n'a été retrouvé."""
+    resultat = ResultatOutil.echec(
+        outil,
+        "Aucun document du corpus ne correspond à cette demande. "
+        "Reformule la demande ou précise le document visé.",
+        motif=MODE_AUCUN_DOCUMENT_PERTINENT,
+    )
+    session.contexte.ajouter_resultat(resultat)
+    return resultat
+
+
+def _executer_par_document(
+    session: SessionAgent,
+    outil: str,
+    ciblage: CiblageDocumentaire,
+    *,
+    document_complet: bool,
+    **arguments: Any,
+) -> ResultatOutil:
+    """
+    Exécute `outil` (classify ou extract, qui refusent de mélanger plusieurs
+    documents) une fois par document ciblé, puis assemble les résultats.
+
+    ``document_complet`` : document entier (`documents=[id]`) — voir
+    `CiblageDocumentaire.document_complet` ; sinon passages déjà retrouvés par la
+    recherche, cloisonnés à ce document (`document=id`).
+
+    Un seul document : le résultat de l'outil est rendu tel quel. Plusieurs :
+    un résultat unique, document par document ; les citations de chaque
+    document sont préfixées `D<n>` (convention multi-document existante,
+    ex. `D1S2`) pour rester sans collision.
+    """
+    resultats: list[tuple[DocumentCible, ResultatOutil]] = []
+    for document in ciblage.documents:
+        cible = (
+            {"documents": [document.identifiant]}
+            if document_complet
+            else {"document": document.identifiant}
+        )
+        resultats.append((document, session.executer_outil(outil, **arguments, **cible)))
+
+    if len(resultats) == 1:
+        return resultats[0][1]
+
+    lignes = [f"{len(resultats)} documents traités :"]
+    par_document: list[dict[str, Any]] = []
+    citations: list[str] = []
+    sources: list[Any] = []
+    avertissements: list[str] = []
+    for rang, (document, resultat) in enumerate(resultats, start=1):
+        lignes.append(f"- [D{rang}] {document.libelle} : {resultat.message}")
+        par_document.append(
+            {
+                "reference": f"D{rang}",
+                "document": document.libelle,
+                "succes": resultat.succes,
+                "message": resultat.message,
+                "donnees": resultat.donnees,
+            }
+        )
+        citations.extend(f"D{rang}{c}" for c in (resultat.donnees.get("citations") or []))
+        if resultat.succes:
+            sources.extend(resultat.sources)
+        avertissements.extend(f"[D{rang}] {a}" for a in resultat.avertissements)
+
+    succes = any(resultat.succes for _, resultat in resultats)
+    donnees: dict[str, Any] = {
+        "documents": list(ciblage.libelles),
+        "resultats_par_document": par_document,
+        "citations": citations,
+    }
+    if not succes:
+        donnees["motif"] = "echec_tous_documents"
+    return ResultatOutil(
+        outil=outil,
+        succes=succes,
+        message="\n".join(lignes),
+        donnees=donnees,
+        sources=sources,
+        avertissements=avertissements,
+    )
+
+
+def _mise_a_jour_noeud(
+    session: SessionAgent, resultat: ResultatOutil, ciblage: CiblageDocumentaire
+) -> dict:
+    """
+    Champs renvoyés au graphe. Quand les documents ont été désignés par la
+    recherche, la réponse le dit explicitement : l'utilisateur voit sur quels
+    documents porte le résultat, même s'il en visait un autre.
+    """
+    if ciblage.mode == MODE_CIBLE_PAR_RECHERCHE:
+        resultat.avertissements.append(
+            "Aucun document désigné par son nom : documents retenus par la "
+            "recherche — " + ", ".join(ciblage.libelles) + "."
+        )
+    return {
+        "session": session,
+        "reponse": resultat,
+        "documents_resolus": ciblage.libelles,
+    }
+
+
 def noeud_summarize(etat: EtatGraphe) -> dict:
     """
-    Exécute l'outil `summarize` via le registre (Action 03B), exactement
-    comme `noeud_rechercher` le fait pour `search` : aucun appel direct à
-    une fonction interne du tool.
+    Exécute l'outil `summarize` via le registre, sur les documents désignés
+    par `_cibler_documents` (le nom exact n'est jamais requis) :
 
-    Désignation du document : même discipline que `noeud_classify` /
-    `noeud_extract` (choix de ROUTAGE générique, indépendant de l'action) :
+        - un seul document (désigné par la requête ou seul retrouvé par la
+          recherche) : `summarize(documents=[id])`, document complet ;
+        - plusieurs documents désignés par la requête :
+          `summarize(documents=[ids])` — l'outil résume déjà plusieurs
+          documents en conservant la provenance de chaque information ;
+        - plusieurs documents retrouvés par la recherche :
+          `summarize(documents=None)` sur les passages retrouvés (mode
+          contextuel) — un résumé ciblé sur la demande, cité ;
+        - rien de pertinent : refus demandant de préciser, sans appeler
+          `summarize`.
 
-        1. un seul document résolu de façon fiable (`perimetre.contraignant`,
-           un unique identifiant) : `summarize(documents=[id])`, mode document
-           complet.
-
-        2. requête visant explicitement un document mais résolution non
-           fiable — plusieurs candidats, périmètre ambigu, ou correspondance
-           sous le seuil (`_document_vise_sans_resolution_fiable`) : refus
-           déterministe construit ici, SANS appeler `summarize` ni `search`.
-           Aucun document n'est choisi implicitement : résumer N documents à
-           la place d'un seul serait factuellement trompeur et coûteux.
-
-        3. aucune référence documentaire dans la requête : comportement
-           historique inchangé — `summarize(documents=None)` retombe sur son
-           mode contextuel (résumé des sources déjà présentes dans
-           `ContexteOutil`, ou échec explicite s'il n'y en a aucune). Jamais
-           de repli vers `search`, jamais de document arbitraire.
-
-    Pas de boucle de récupération pour un échec de `summarize` dans cette
-    action : succès ou échec, le `ResultatOutil` devient directement la
-    réponse finale du graphe.
+    Succès ou échec, le `ResultatOutil` devient directement la réponse finale.
     """
     session = etat.session
     requete = session.etat.requete_courante
+    ciblage = _cibler_documents(session, requete)
 
-    perimetre, statut_resolution = _resoudre_perimetre_document(
-        requete, corpus_id=session.contexte.corpus_id
-    )
-    document: str | None = None
-    if (
-        perimetre is not None
-        and perimetre.contraignant
-        and len(perimetre.valeurs_filtre) == 1
-    ):
-        document = perimetre.valeurs_filtre[0]
-
-    if document is not None:
-        mode = "document_complet"
+    documents_demandes: list[str] | None = None
+    if ciblage.mode == MODE_AUCUN_DOCUMENT_PERTINENT:
+        resultat = _refus_aucun_document(session, "summarize")
+    elif ciblage.document_complet:
+        documents_demandes = list(ciblage.identifiants)
         resultat = session.executer_outil(
-            "summarize",
-            objectif=requete,
-            documents=[document],
+            "summarize", objectif=requete, documents=documents_demandes
         )
-    elif _document_vise_sans_resolution_fiable(perimetre):
-        mode = "document_vise_non_resolu"
-        candidats = ", ".join(perimetre.libelles) if perimetre.libelles else None
-        message = (
-            (
-                f"Plusieurs documents correspondent à la demande sans désignation "
-                f"fiable ({candidats}). Précise le document à résumer."
-            )
-            if candidats
-            else (
-                "Document à résumer non identifié de façon fiable. "
-                "Précise le document à résumer."
-            )
-        )
-        resultat = ResultatOutil.echec("summarize", message)
-        session.contexte.ajouter_resultat(resultat)
     else:
-        mode = "contexte_existant"
-        resultat = session.executer_outil(
-            "summarize",
-            objectif=requete,
-            documents=None,
-        )
+        resultat = session.executer_outil("summarize", objectif=requete, documents=None)
 
     session.etat.ajouter_trace(
         "summarize",
         "Résumé produit." if resultat.succes else "Résumé impossible.",
         succes=resultat.succes,
-        documents_demandes=[document] if document else None,
-        document_demande=document,
-        resolution_documentaire=statut_resolution,
-        mode=mode,
+        documents_demandes=documents_demandes,
+        document_demande=ciblage.document_demande,
+        documents_cibles=list(ciblage.libelles),
+        resolution_documentaire=ciblage.statut_resolution,
+        mode=ciblage.mode,
     )
 
-    return {"session": session, "reponse": resultat}
-
-
-# Raison renvoyée par `CatalogueDocuments.resoudre` (`src.rag.retrieval`,
-# non modifiée ici) lorsqu'une correspondance a été détectée mais reste sous
-# le seuil de résolution — un signal qu'un document semble bien visé par la
-# requête, contrairement à l'absence totale de correspondance. Limite
-# connue : le résolveur ne distingue pas structurellement « document nommé
-# mais totalement absent du catalogue » d'« aucune référence documentaire
-# dans la requête » — les deux retombent sur statut="aucun" avec cette même
-# raison OU sur raison="aucune_correspondance" selon les cas ; seule cette
-# dernière est traitée comme « aucun document visé » (voir
-# `_document_vise_sans_resolution_fiable`).
-_RAISON_CORRESPONDANCE_PARTIELLE = "score_insuffisant"
-
-
-def _document_vise_sans_resolution_fiable(perimetre: Any) -> bool:
-    """
-    Vrai si la requête semble viser un document précis que la résolution ne
-    peut pas désigner de façon fiable : plusieurs candidats également
-    valables (`statut="compatible"`), périmètre trop ambigu pour trancher
-    (`statut="ambigu"`), ou une correspondance détectée mais insuffisante
-    (`statut="aucun"`, `raison="score_insuffisant"`).
-
-    Distinct du cas où la requête ne référence aucun document du tout
-    (`statut="aucun"` avec toute autre raison, ex. `"aucune_correspondance"`)
-    — ce dernier cas relève du mode historique contextuel
-    (`ContexteOutil.sources`), pas d'un refus.
-    """
-    if perimetre is None:
-        return False
-    if perimetre.statut in {"compatible", "ambigu"}:
-        return True
-    return (
-        perimetre.statut == "aucun"
-        and perimetre.raison == _RAISON_CORRESPONDANCE_PARTIELLE
-    )
+    return _mise_a_jour_noeud(session, resultat, ciblage)
 
 
 def noeud_classify(etat: EtatGraphe) -> dict:
     """
-    Exécute l'outil `classify` via le registre (cette action), exactement
-    comme `noeud_rechercher` le fait pour `search`.
+    Exécute l'outil `classify` via le registre, sur les documents désignés
+    par `_cibler_documents` (le nom exact n'est jamais requis) :
 
-    Trois chemins, selon ce que la résolution documentaire indique :
-
-        1. document résolu de façon unique (`perimetre.contraignant`, un
-           seul identifiant) : `classify` est appelé en mode document
-           complet (`classify(documents=[...])`, Option E — classification
-           hiérarchique par lots + agrégation déterministe, voir
-           `src.tools.classify`). Aucun `search` interne n'est exécuté.
-
-        2. requête visant explicitement un document, mais résolution non
-           fiable — plusieurs candidats également valables, périmètre
-           ambigu, ou correspondance sous le seuil de résolution (voir
-           `_document_vise_sans_resolution_fiable`) : refus déterministe
-           construit directement ici, SANS appeler `classify` ni `search`.
-           Aucun document n'est choisi implicitement, et aucun retrieval de
-           repli n'est tenté : un choix approximatif serait factuellement
-           risqué pour une classification document-level (voir audit
-           préalable de cette mission).
-
-        3. aucune référence documentaire détectée dans la requête (périmètre
-           "aucun" pour toute autre raison) : comportement historique
-           inchangé — un `search` ciblé alimente `ContexteOutil.sources` si
-           le contexte est encore vide, puis `classify(document=None)`
-           retombe sur son mode Cas B (classification des sources déjà
-           présentes, avec le cloisonnement `_filtrer_document` existant si
-           plusieurs documents apparaissent). C'est le seul cas où ce mode
-           historique contextuel reste sollicité.
+        - documents désignés par la requête, ou document unique retrouvé
+          par la recherche : classification du document complet (Option E
+          de `src.tools.classify`), un appel par document ;
+        - plusieurs documents retrouvés par la recherche : classification
+          des passages retrouvés, cloisonnée document par document
+          (`classify` refuse de mélanger plusieurs documents dans un même
+          vote) ;
+        - rien de pertinent : refus demandant de préciser.
 
     Catégories : toujours celles du profil technique actif
     (`profil.classification.noms()`), jamais inventées ni demandées à
-    l'utilisateur — le même vocabulaire que celui utilisé à l'ingestion.
-
-    Pas de boucle de récupération pour un échec de `classify` : succès ou
-    échec, le `ResultatOutil` devient directement la réponse finale.
+    l'utilisateur. Succès ou échec, le `ResultatOutil` devient directement
+    la réponse finale.
     """
     session = etat.session
     requete = session.etat.requete_courante
     categories = get_profil().classification.noms()
+    ciblage = _cibler_documents(session, requete)
 
-    perimetre, statut_resolution = _resoudre_perimetre_document(
-        requete, corpus_id=session.contexte.corpus_id
-    )
-    document: str | None = None
-    if (
-        perimetre is not None
-        and perimetre.contraignant
-        and len(perimetre.valeurs_filtre) == 1
-    ):
-        document = perimetre.valeurs_filtre[0]
-
-    if document is not None:
-        mode = "document_complet"
-        resultat = session.executer_outil(
-            "classify",
-            categories=categories,
-            documents=[document],
-        )
-    elif _document_vise_sans_resolution_fiable(perimetre):
-        mode = "document_vise_non_resolu"
-        candidats = ", ".join(perimetre.libelles) if perimetre.libelles else None
-        message = (
-            (
-                f"Plusieurs documents correspondent à la demande sans désignation "
-                f"fiable ({candidats}). Précise le document à classifier."
-            )
-            if candidats
-            else (
-                "Document à classifier non identifié de façon fiable. "
-                "Précise le document à classifier."
-            )
-        )
-        resultat = ResultatOutil.echec("classify", message)
-        session.contexte.ajouter_resultat(resultat)
+    if ciblage.mode == MODE_AUCUN_DOCUMENT_PERTINENT:
+        resultat = _refus_aucun_document(session, "classify")
     else:
-        mode = "contexte_existant"
-        if not session.a_des_preuves:
-            session.executer_outil("search", requete=requete)
-
-        resultat = session.executer_outil(
+        resultat = _executer_par_document(
+            session,
             "classify",
+            ciblage,
+            document_complet=ciblage.document_complet,
             categories=categories,
-            document=None,
         )
 
     session.etat.ajouter_trace(
         "classify",
         "Classification produite." if resultat.succes else "Classification impossible.",
         succes=resultat.succes,
-        document_demande=document,
-        resolution_documentaire=statut_resolution,
-        mode=mode,
+        document_demande=ciblage.document_demande,
+        documents_cibles=list(ciblage.libelles),
+        resolution_documentaire=ciblage.statut_resolution,
+        mode=ciblage.mode,
     )
 
-    return {"session": session, "reponse": resultat}
+    return _mise_a_jour_noeud(session, resultat, ciblage)
 
 
 def noeud_extract(etat: EtatGraphe) -> dict:
     """
-    Exécute l'outil `extract` via le registre (Action 04), exactement comme
-    `noeud_classify` le fait pour `classify`.
+    Exécute l'outil `extract` via le registre, sur les documents désignés
+    par `_cibler_documents` (le nom exact n'est jamais requis) — même
+    ciblage que `noeud_classify`, un appel par document.
 
-    Réutilise DÉLIBÉRÉMENT le critère de routage de `noeud_classify` pour les
-    deux premiers cas (document résolu de façon unique et fiable -> mode
-    document complet, sans search ; requête visant explicitement un document
-    mais résolution non fiable -> refus déterministe, sans search ni appel à
-    `extract`).
+    Remplace l'invariant P1.6 (EX-03), qui refusait toute extraction sans
+    document nommé : le périmètre n'est plus choisi « par convenance » et
+    en silence, il est désigné par la recherche selon une règle
+    déterministe (`_documents_retrouves`) et chaque document traité est
+    nommé dans la réponse, avec ses propres citations.
 
-    Troisième cas — aucune référence documentaire fiable : depuis P1.6,
-    EXTRACT diverge volontairement de CLASSIFY/SUMMARIZE. Plus aucun repli
-    `search` global suivi d'une `extract(document=None)`. Ce repli
-    transformait une recherche multi-document en extraction structurée
-    implicite dès que le top-k ne faisait ressortir qu'un seul document —
-    un choix de périmètre par convenance, non déterministe d'un corpus à
-    l'autre (défaut EX-03). EXTRACT n'accepte donc un périmètre que
-    lorsqu'il est résolu de façon unique et fiable ; sinon, refus
-    déterministe demandant de préciser le document, sans jamais appeler
-    `search` ni `extract`.
-
-    L'AGRÉGATION, elle, reste spécifique à extract (déduplication de
-    valeurs, jamais un vote majoritaire — voir `src.tools.extract`, qui ne
-    réutilise aucune logique de `classify`).
-
-    Les champs demandés sont obtenus par un appel LLM borné distinct
-    (`_parser_champs_extraction`), déclenché une seule fois ici, après que
-    l'intention EXTRACT est déjà confirmée par `noeud_detecter_intention` —
-    jamais pendant la détection d'intention elle-même.
+    L'AGRÉGATION reste spécifique à extract (déduplication de valeurs,
+    jamais un vote). Les champs demandés sont obtenus par un appel LLM borné
+    distinct (`_parser_champs_extraction`), déclenché une seule fois ici.
     """
     session = etat.session
     requete = session.etat.requete_courante
 
     champs = _parser_champs_extraction(session.llm, requete)
+    ciblage = _cibler_documents(session, requete)
 
-    perimetre, statut_resolution = _resoudre_perimetre_document(
-        requete, corpus_id=session.contexte.corpus_id
-    )
-    document: str | None = None
-    if (
-        perimetre is not None
-        and perimetre.contraignant
-        and len(perimetre.valeurs_filtre) == 1
-    ):
-        document = perimetre.valeurs_filtre[0]
-
-    if document is not None:
-        mode = "document_complet"
-        resultat = session.executer_outil(
-            "extract",
-            champs=champs,
-            documents=[document],
-        )
-    elif _document_vise_sans_resolution_fiable(perimetre):
-        mode = "document_vise_non_resolu"
-        candidats = ", ".join(perimetre.libelles) if perimetre.libelles else None
-        message = (
-            (
-                f"Plusieurs documents correspondent à la demande sans désignation "
-                f"fiable ({candidats}). Précise le document sur lequel extraire."
-            )
-            if candidats
-            else (
-                "Document à traiter non identifié de façon fiable. "
-                "Précise le document sur lequel extraire."
-            )
-        )
-        resultat = ResultatOutil.echec("extract", message)
-        session.contexte.ajouter_resultat(resultat)
+    if ciblage.mode == MODE_AUCUN_DOCUMENT_PERTINENT:
+        resultat = _refus_aucun_document(session, "extract")
     else:
-        # Périmètre "aucun" pour toute autre raison que "score_insuffisant"
-        # (typiquement "aucune_correspondance") : la requête ne désigne
-        # aucun document de façon fiable. P1.6 — plus de repli
-        # `search` global -> `extract(document=None)` : EXTRACT ne reçoit un
-        # périmètre que résolu de façon unique et fiable (branche
-        # `document_complet`). Refus déterministe, sans `search` ni `extract`.
-        mode = "aucun_document_fiable"
-        resultat = ResultatOutil.echec(
+        resultat = _executer_par_document(
+            session,
             "extract",
-            "Aucun document n'a pu être identifié de façon fiable pour cette "
-            "extraction. Précise le document sur lequel extraire.",
+            ciblage,
+            document_complet=ciblage.document_complet,
+            champs=champs,
         )
-        session.contexte.ajouter_resultat(resultat)
 
     session.etat.ajouter_trace(
         "extract",
         "Extraction produite." if resultat.succes else "Extraction impossible.",
         succes=resultat.succes,
         champs_demandes=champs,
-        document_demande=document,
-        resolution_documentaire=statut_resolution,
-        mode=mode,
+        document_demande=ciblage.document_demande,
+        documents_cibles=list(ciblage.libelles),
+        resolution_documentaire=ciblage.statut_resolution,
+        mode=ciblage.mode,
     )
 
-    return {"session": session, "reponse": resultat}
+    return _mise_a_jour_noeud(session, resultat, ciblage)
 
 
 def _signal_multidoc_courant(etat: EtatGraphe, requete: str) -> Any:

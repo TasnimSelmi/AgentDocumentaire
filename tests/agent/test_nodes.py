@@ -330,24 +330,34 @@ def test_noeud_summarize_transmet_les_documents_resolus(monkeypatch) -> None:
     assert session.etat.trace[-1].donnees["resolution_documentaire"] == "exact"
 
 
-def test_noeud_summarize_sans_document_resolu_passe_documents_none(monkeypatch) -> None:
+def test_noeud_summarize_sans_document_nomme_resume_le_document_retrouve(monkeypatch) -> None:
+    """
+    Aucun document nommé : la recherche désigne le document pertinent, résumé
+    en entier. Le nom exact du fichier n'est jamais une précondition.
+    """
     perimetre = PerimetreDocumentaire(statut="aucun", raison="aucune_correspondance")
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
     fabrique, appels = _outil_summarize_capture(resultat)
+    fabrique_search, compteur = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
     session = construire_session(
-        "Résume les éléments trouvés.",
+        "Résume-moi le document sur la transformation numérique.",
         llm=_LLMNonSollicite(),
         charger_profil_domaine=False,
-        fabriques=[fabrique],
+        fabriques=[fabrique_search, fabrique],
     )
-    etat = EtatGraphe(session=session)
+    mise_a_jour = nodes.noeud_summarize(EtatGraphe(session=session))
 
-    nodes.noeud_summarize(etat)
+    assert compteur[0] == 1
+    assert appels == [
+        {"objectif": "Résume-moi le document sur la transformation numérique.", "documents": ["d1"]}
+    ]
+    assert session.etat.trace[-1].donnees["mode"] == "cible_par_recherche"
+    assert mise_a_jour["documents_resolus"] == ("doc.pdf",)
+    assert any("doc.pdf" in a for a in mise_a_jour["reponse"].avertissements)
 
-    assert appels == [{"objectif": "Résume les éléments trouvés.", "documents": None}]
 
 
 def test_noeud_summarize_exact_appelle_summarize_une_fois_avec_un_document(monkeypatch) -> None:
@@ -373,31 +383,34 @@ def test_noeud_summarize_exact_appelle_summarize_une_fois_avec_un_document(monke
     assert session.etat.trace[-1].donnees["mode"] == "document_complet"
 
 
-def test_noeud_summarize_ambiguite_refuse_sans_appeler_summarize(monkeypatch) -> None:
+def test_noeud_summarize_ambiguite_passe_par_la_recherche(monkeypatch) -> None:
+    """Désignation ambiguë : plus de refus, la recherche désigne le document."""
     perimetre = PerimetreDocumentaire(
         statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
     )
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
-    resultat = ResultatOutil(outil="summarize", succes=False, message="ne doit pas être appelé")
+    resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
     fabrique, appels = _outil_summarize_capture(resultat)
+    fabrique_search, compteur = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
     session = construire_session(
         "Résume le rapport.",
         llm=_LLMNonSollicite(),
         charger_profil_domaine=False,
-        fabriques=[fabrique],
+        fabriques=[fabrique_search, fabrique],
     )
     mise_a_jour = nodes.noeud_summarize(EtatGraphe(session=session))
 
-    # L'outil summarize N'EST PAS appelé : refus déterministe construit dans le nœud.
-    assert appels == []
-    assert mise_a_jour["reponse"].succes is False
-    assert "Rapport A" in mise_a_jour["reponse"].message
-    assert session.etat.trace[-1].donnees["mode"] == "document_vise_non_resolu"
+    assert compteur[0] == 1
+    assert appels[0]["documents"] == ["d1"]
+    assert mise_a_jour["reponse"] is resultat
+    assert session.etat.trace[-1].donnees["resolution_documentaire"] == "ambigu"
 
 
-def test_noeud_summarize_compatible_multi_documents_refuse_sans_appeler_summarize(monkeypatch) -> None:
+
+def test_noeud_summarize_compatible_resume_tous_les_documents_designes(monkeypatch) -> None:
+    """Plusieurs documents désignés par la requête : tous résumés, sans recherche."""
     perimetre = PerimetreDocumentaire(
         statut="compatible",
         valeurs_filtre=("doc-a", "doc-b", "doc-c"),
@@ -405,20 +418,23 @@ def test_noeud_summarize_compatible_multi_documents_refuse_sans_appeler_summariz
     )
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
-    resultat = ResultatOutil(outil="summarize", succes=False, message="ne doit pas être appelé")
+    resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
     fabrique, appels = _outil_summarize_capture(resultat)
+    fabrique_search, compteur = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
     session = construire_session(
-        "Résume le document cquae_doc_219.txt.",
+        "Résume les baromètres.",
         llm=_LLMNonSollicite(),
         charger_profil_domaine=False,
-        fabriques=[fabrique],
+        fabriques=[fabrique_search, fabrique],
     )
     mise_a_jour = nodes.noeud_summarize(EtatGraphe(session=session))
 
-    assert appels == []  # jamais les 3 documents envoyés au map-reduce
-    assert mise_a_jour["reponse"].succes is False
-    assert session.etat.trace[-1].donnees["mode"] == "document_vise_non_resolu"
+    assert compteur[0] == 0
+    assert appels[0]["documents"] == ["doc-a", "doc-b", "doc-c"]
+    assert session.etat.trace[-1].donnees["mode"] == "documents_nommes"
+    assert mise_a_jour["documents_resolus"] == ("Doc A", "Doc B", "Doc C")
+
 
 
 def test_noeud_summarize_resolution_en_echec_ne_casse_pas_le_graphe(monkeypatch) -> None:
@@ -429,20 +445,23 @@ def test_noeud_summarize_resolution_en_echec_ne_casse_pas_le_graphe(monkeypatch)
 
     resultat = ResultatOutil(outil="summarize", succes=True, message="Résumé produit.")
     fabrique, appels = _outil_summarize_capture(resultat)
+    fabrique_search, _ = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
     session = construire_session(
         "Résume le rapport CNIL 2023.",
         llm=_LLMNonSollicite(),
         charger_profil_domaine=False,
-        fabriques=[fabrique],
+        fabriques=[fabrique_search, fabrique],
     )
     etat = EtatGraphe(session=session)
 
     mise_a_jour = nodes.noeud_summarize(etat)
 
-    assert appels[0]["documents"] is None
+    # Résolution en échec : la recherche prend le relais.
+    assert appels[0]["documents"] == ["d1"]
     assert mise_a_jour["reponse"] is resultat
     assert session.etat.trace[-1].donnees["resolution_documentaire"] == "erreur"
+
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +767,60 @@ def _outil_search_avec_compteur(
     return _fabrique, compteur
 
 
+def _outil_search_documents(
+    scores_par_document: dict[str, float],
+) -> tuple[Callable[[], DefinitionOutil], list[int]]:
+    """
+    Recherche factice retrouvant un passage par document (`doc_id` =
+    `<nom>`, `nom_fichier` = `<nom>.pdf`), avec le score de reranking donné.
+    """
+    compteur: list[int] = [0]
+
+    def _fonction(*, contexte=None, **kw) -> ResultatOutil:
+        compteur[0] += 1
+        passages = [
+            Passage(
+                citation=f"S{rang}",
+                rang=rang,
+                point_id=f"p{rang}",
+                doc_id=doc_id,
+                chunk_index=0,
+                texte="Un extrait.",
+                source=f"{doc_id}.pdf",
+                nom_fichier=f"{doc_id}.pdf",
+                page=1,
+                categorie="",
+                score_recherche=score,
+                score_reranking=score,
+            )
+            for rang, (doc_id, score) in enumerate(scores_par_document.items(), start=1)
+        ]
+        if contexte is not None:
+            contexte.dernier_rapport_recherche = _un_rapport(passages)
+        return ResultatOutil(
+            outil="search",
+            succes=True,
+            message=f"{len(passages)} passage(s) trouvé(s).",
+            sources=[
+                SourceOutil(
+                    doc_id=p.doc_id, source=p.source, nom_fichier=p.nom_fichier,
+                    page=1, score=p.score_final, extrait=p.texte,
+                )
+                for p in passages
+            ],
+        )
+
+    def _fabrique() -> DefinitionOutil:
+        return DefinitionOutil(
+            nom="search",
+            description="Search factice multi-documents.",
+            schema_arguments=_ArgsSearchFactice,
+            fonction=_fonction,
+        )
+
+    return _fabrique, compteur
+
+
 def test_noeud_classify_document_resolu_utilise_mode_document_complet_sans_search(monkeypatch) -> None:
     """
     Périmètre résolu de façon non ambiguë (un seul document) : classify passe
@@ -783,6 +856,7 @@ def test_noeud_classify_document_resolu_utilise_mode_document_complet_sans_searc
 
 
 def test_noeud_classify_ne_relance_pas_search_si_sources_deja_presentes(monkeypatch) -> None:
+    """Preuves déjà présentes : elles désignent le document, sans nouveau search."""
     monkeypatch.setattr(
         nodes,
         "resoudre_document",
@@ -805,23 +879,25 @@ def test_noeud_classify_ne_relance_pas_search_si_sources_deja_presentes(monkeypa
     nodes.noeud_classify(etat)
 
     assert compteur_recherche[0] == 0
-    assert appels_classify[0]["document"] is None
+    assert appels_classify[0]["documents"] == ["d1"]
 
 
-def test_noeud_classify_document_non_ambigu_refuse_sans_appeler_loutil(monkeypatch) -> None:
+
+def test_noeud_classify_compatible_classe_chaque_document_designe(monkeypatch) -> None:
     """
-    Périmètre 'compatible' à plusieurs valeurs : la requête vise
-    explicitement un document, mais la résolution ne peut pas trancher entre
-    plusieurs candidats également valables. `classify` n'est PAS appelé (le
-    refus est construit directement par le nœud, aucun choix implicite), et
-    aucun `search` de repli n'est déclenché.
+    Périmètre 'compatible' à plusieurs valeurs : chaque document désigné est
+    classifié séparément (document complet, `classify` ne mélange jamais
+    deux documents dans un vote), sans search ; un seul résultat assemblé.
     """
     perimetre = PerimetreDocumentaire(
         statut="compatible", valeurs_filtre=("doc-a", "doc-b"), libelles=("Doc A", "Doc B")
     )
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
-    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
+    resultat_classify = ResultatOutil(
+        outil="classify", succes=True, message="Document classifié.",
+        donnees={"categorie": "rapport", "citations": ["S1"]},
+    )
     fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
     fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
@@ -831,24 +907,26 @@ def test_noeud_classify_document_non_ambigu_refuse_sans_appeler_loutil(monkeypat
         charger_profil_domaine=False,
         fabriques=[fabrique_search, fabrique_classify],
     )
-    etat = EtatGraphe(session=session)
+    mise_a_jour = nodes.noeud_classify(EtatGraphe(session=session))
 
-    mise_a_jour = nodes.noeud_classify(etat)
-
-    assert appels_classify == []
+    assert [appel["documents"] for appel in appels_classify] == [["doc-a"], ["doc-b"]]
     assert compteur_recherche[0] == 0
-    assert mise_a_jour["reponse"].succes is False
-    assert "Doc A" in mise_a_jour["reponse"].message and "Doc B" in mise_a_jour["reponse"].message
+    reponse = mise_a_jour["reponse"]
+    assert reponse.succes is True
+    assert "Doc A" in reponse.message and "Doc B" in reponse.message
+    assert reponse.donnees["citations"] == ["D1S1", "D2S1"]
+    assert [r["document"] for r in reponse.donnees["resultats_par_document"]] == ["Doc A", "Doc B"]
 
 
-def test_noeud_classify_document_ambigu_refuse_sans_search(monkeypatch) -> None:
-    """Périmètre 'ambigu' (candidats trop proches) : refus propre, aucun search."""
+
+def test_noeud_classify_document_ambigu_passe_par_la_recherche(monkeypatch) -> None:
+    """Périmètre 'ambigu' : la recherche désigne le document, classé en entier."""
     perimetre = PerimetreDocumentaire(
         statut="ambigu", raison="marge_insuffisante", libelles=("Rapport A", "Rapport B")
     )
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
-    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
+    resultat_classify = ResultatOutil(outil="classify", succes=True, message="ok")
     fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
     fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
@@ -858,29 +936,64 @@ def test_noeud_classify_document_ambigu_refuse_sans_search(monkeypatch) -> None:
         charger_profil_domaine=False,
         fabriques=[fabrique_search, fabrique_classify],
     )
-    etat = EtatGraphe(session=session)
+    mise_a_jour = nodes.noeud_classify(EtatGraphe(session=session))
 
-    mise_a_jour = nodes.noeud_classify(etat)
-
-    assert appels_classify == []
-    assert compteur_recherche[0] == 0
-    assert mise_a_jour["reponse"].succes is False
+    assert compteur_recherche[0] == 1
+    assert appels_classify[0]["documents"] == ["d1"]
+    assert mise_a_jour["reponse"] is resultat_classify
 
 
-def test_noeud_classify_document_introuvable_refuse_sans_search(monkeypatch) -> None:
+
+def test_noeud_classify_plusieurs_documents_retrouves_classes_un_par_un(monkeypatch) -> None:
     """
-    Correspondance détectée mais sous le seuil de résolution
-    (`raison="score_insuffisant"`) : la requête semble viser un document
-    précis (introuvable de façon fiable), refus propre, aucun search de
-    repli — distinct du cas où aucune référence documentaire n'est présente
-    du tout (voir `test_noeud_classify_ne_relance_pas_search_si_sources_deja_presentes`).
+    « Classe les documents qui parlent de cybersécurité » : chaque document
+    retrouvé est classé sur ses propres passages (`document=<id>`), au plus
+    MAX_DOCUMENTS_CIBLES, dans l'ordre de pertinence.
+    """
+    monkeypatch.setattr(
+        nodes,
+        "resoudre_document",
+        lambda requete, corpus_id=None: PerimetreDocumentaire(
+            statut="aucun", raison="aucune_correspondance"
+        ),
+    )
+
+    resultat_classify = ResultatOutil(
+        outil="classify", succes=True, message="Document classifié.",
+        donnees={"citations": ["S1", "S2"]},
+    )
+    fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
+    fabrique_search, _ = _outil_search_documents(
+        {"cyber": 0.95, "francenum": 0.80, "insee": 0.75, "cae": 0.60}
+    )
+
+    session = construire_session(
+        "Classe les documents qui parlent de cybersécurité.",
+        llm=_LLMNonSollicite(),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    mise_a_jour = nodes.noeud_classify(EtatGraphe(session=session))
+
+    assert nodes.MAX_DOCUMENTS_CIBLES == 3
+    assert [appel["document"] for appel in appels_classify] == ["cyber", "francenum", "insee"]
+    assert all("documents" not in appel for appel in appels_classify)
+    reponse = mise_a_jour["reponse"]
+    assert reponse.donnees["citations"] == ["D1S1", "D1S2", "D2S1", "D2S2", "D3S1", "D3S2"]
+    assert reponse.donnees["documents"] == ["cyber.pdf", "francenum.pdf", "insee.pdf"]
+
+
+def test_noeud_classify_rien_de_pertinent_demande_une_precision(monkeypatch) -> None:
+    """
+    Correspondance sous le seuil et recherche sans résultat : seul cas de
+    refus — une précision est demandée, `classify` n'est pas appelé.
     """
     perimetre = PerimetreDocumentaire(statut="aucun", raison="score_insuffisant", score=0.05)
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_classify = ResultatOutil(outil="classify", succes=True, message="ne devrait jamais être appelé")
     fabrique_classify, appels_classify = _outil_classify_capture(resultat_classify)
-    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(None)
 
     session = construire_session(
         "Classe le rapport Inexistant-XYZ.",
@@ -888,13 +1001,14 @@ def test_noeud_classify_document_introuvable_refuse_sans_search(monkeypatch) -> 
         charger_profil_domaine=False,
         fabriques=[fabrique_search, fabrique_classify],
     )
-    etat = EtatGraphe(session=session)
-
-    mise_a_jour = nodes.noeud_classify(etat)
+    mise_a_jour = nodes.noeud_classify(EtatGraphe(session=session))
 
     assert appels_classify == []
-    assert compteur_recherche[0] == 0
+    assert compteur_recherche[0] == 1
     assert mise_a_jour["reponse"].succes is False
+    assert "précise le document" in mise_a_jour["reponse"].message
+    assert session.etat.trace[-1].donnees["mode"] == "aucun_document_pertinent"
+
 
 
 def test_noeud_classify_passe_par_le_registre_et_journalise(monkeypatch) -> None:
@@ -987,14 +1101,14 @@ def test_noeud_extract_document_resolu_utilise_mode_document_complet_sans_search
     assert compteur_recherche[0] == 0
 
 
-def test_noeud_extract_document_ambigu_refuse_sans_appeler_loutil(monkeypatch) -> None:
-    """Périmètre 'compatible' à plusieurs valeurs : refus propre, aucun appel à extract ni search."""
+def test_noeud_extract_compatible_extrait_chaque_document_designe(monkeypatch) -> None:
+    """Périmètre 'compatible' : une extraction par document désigné, sans search."""
     perimetre = PerimetreDocumentaire(
         statut="compatible", valeurs_filtre=("doc-a", "doc-b"), libelles=("Doc A", "Doc B")
     )
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
-    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="1 information extraite.")
     fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
     fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
@@ -1004,24 +1118,24 @@ def test_noeud_extract_document_ambigu_refuse_sans_appeler_loutil(monkeypatch) -
         charger_profil_domaine=False,
         fabriques=[fabrique_search, fabrique_extract],
     )
-    etat = EtatGraphe(session=session)
+    mise_a_jour = nodes.noeud_extract(EtatGraphe(session=session))
 
-    mise_a_jour = nodes.noeud_extract(etat)
-
-    assert appels_extract == []
+    assert [appel["documents"] for appel in appels_extract] == [["doc-a"], ["doc-b"]]
+    assert all(appel["champs"] == ["montant"] for appel in appels_extract)
     assert compteur_recherche[0] == 0
-    assert mise_a_jour["reponse"].succes is False
+    assert mise_a_jour["reponse"].succes is True
     assert "Doc A" in mise_a_jour["reponse"].message and "Doc B" in mise_a_jour["reponse"].message
 
 
-def test_noeud_extract_document_introuvable_refuse_sans_search(monkeypatch) -> None:
-    """Correspondance détectée mais sous le seuil de résolution : refus propre, aucun search."""
+
+def test_noeud_extract_rien_de_pertinent_demande_une_precision(monkeypatch) -> None:
+    """Correspondance sous le seuil et recherche vide : refus, `extract` non appelé."""
     perimetre = PerimetreDocumentaire(statut="aucun", raison="score_insuffisant", score=0.05)
     monkeypatch.setattr(nodes, "resoudre_document", lambda requete, corpus_id=None: perimetre)
 
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
     fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
-    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(None)
 
     session = construire_session(
         "Donne-moi le montant du rapport Inexistant-XYZ.",
@@ -1029,20 +1143,18 @@ def test_noeud_extract_document_introuvable_refuse_sans_search(monkeypatch) -> N
         charger_profil_domaine=False,
         fabriques=[fabrique_search, fabrique_extract],
     )
-    etat = EtatGraphe(session=session)
-
-    mise_a_jour = nodes.noeud_extract(etat)
+    mise_a_jour = nodes.noeud_extract(EtatGraphe(session=session))
 
     assert appels_extract == []
-    assert compteur_recherche[0] == 0
+    assert compteur_recherche[0] == 1
     assert mise_a_jour["reponse"].succes is False
 
 
-def test_noeud_extract_aucun_document_fiable_refuse_sans_search_ni_extract(monkeypatch) -> None:
+
+def test_noeud_extract_sans_document_nomme_extrait_du_document_retrouve(monkeypatch) -> None:
     """
-    P1.6 — aucune référence documentaire fiable (`statut="aucun"`,
-    `raison != "score_insuffisant"`) : refus déterministe. Ni `search` global,
-    ni `extract` : EXTRACT ne fabrique pas de périmètre à partir d'un top-k.
+    Remplace l'invariant P1.6 : sans document nommé, la recherche désigne le
+    document (un seul ici), extrait en entier, et la réponse le nomme.
     """
     monkeypatch.setattr(
         nodes,
@@ -1052,7 +1164,7 @@ def test_noeud_extract_aucun_document_fiable_refuse_sans_search_ni_extract(monke
         ),
     )
 
-    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ok")
     fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
     fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
 
@@ -1062,21 +1174,20 @@ def test_noeud_extract_aucun_document_fiable_refuse_sans_search_ni_extract(monke
         charger_profil_domaine=False,
         fabriques=[fabrique_search, fabrique_extract],
     )
-    etat = EtatGraphe(session=session)
+    mise_a_jour = nodes.noeud_extract(EtatGraphe(session=session))
 
-    mise_a_jour = nodes.noeud_extract(etat)
-
-    assert appels_extract == []
-    assert compteur_recherche[0] == 0
-    assert mise_a_jour["reponse"].succes is False
-    assert "Précise le document" in mise_a_jour["reponse"].message
+    assert compteur_recherche[0] == 1
+    assert appels_extract == [{"champs": ["montant"], "documents": ["d1"]}]
+    assert mise_a_jour["documents_resolus"] == ("doc.pdf",)
+    assert any("doc.pdf" in a for a in mise_a_jour["reponse"].avertissements)
 
 
-def test_noeud_extract_ne_choisit_jamais_un_document_depuis_un_top_k(monkeypatch) -> None:
+
+def test_noeud_extract_plusieurs_documents_retrouves_extraits_un_par_un(monkeypatch) -> None:
     """
-    Même sans document nommé, des sources déjà présentes dans le contexte (un
-    éventuel top-k d'un search antérieur) ne doivent JAMAIS servir de
-    périmètre implicite : refus, aucun `search`, aucun `extract`.
+    Plusieurs documents retrouvés : extraction cloisonnée par document sur
+    les passages retrouvés (`document=<id>`), bornée par le ratio de
+    pertinence — le document en queue de classement est écarté.
     """
     monkeypatch.setattr(
         nodes,
@@ -1086,27 +1197,32 @@ def test_noeud_extract_ne_choisit_jamais_un_document_depuis_un_top_k(monkeypatch
         ),
     )
 
-    resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
+    resultat_extract = ResultatOutil(outil="extract", succes=True, message="1 information extraite.")
     fabrique_extract, appels_extract = _outil_extract_capture(resultat_extract)
-    fabrique_search, compteur_recherche = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+    fabrique_search, compteur = _outil_search_documents(
+        {"insee": 0.92, "francenum": 0.70, "senat": 0.20}
+    )
 
     session = construire_session(
-        "Donne-moi le montant.",
-        llm=_LLMChamps(["montant"]),
+        "Extrais les chiffres sur l'adoption de l'IA.",
+        llm=_LLMChamps(["taux d'adoption de l'IA"]),
         charger_profil_domaine=False,
         fabriques=[fabrique_search, fabrique_extract],
     )
-    session.contexte.sources.append(_une_source(0.9))
-    etat = EtatGraphe(session=session)
+    mise_a_jour = nodes.noeud_extract(EtatGraphe(session=session))
 
-    mise_a_jour = nodes.noeud_extract(etat)
+    assert compteur[0] == 1
+    assert [appel["document"] for appel in appels_extract] == ["insee", "francenum"]
+    assert mise_a_jour["documents_resolus"] == ("insee.pdf", "francenum.pdf")
+    reponse = mise_a_jour["reponse"]
+    assert reponse.succes is True
+    assert "[D1] insee.pdf" in reponse.message and "[D2] francenum.pdf" in reponse.message
+    assert "senat" not in reponse.message
+    assert session.etat.trace[-1].donnees["mode"] == "cible_par_recherche"
 
-    assert appels_extract == []
-    assert compteur_recherche[0] == 0
-    assert mise_a_jour["reponse"].succes is False
 
 
-def test_noeud_extract_journalise_le_refus_aucun_document_fiable(monkeypatch) -> None:
+def test_noeud_extract_journalise_le_refus_aucun_document_pertinent(monkeypatch) -> None:
     monkeypatch.setattr(
         nodes,
         "resoudre_document",
@@ -1117,7 +1233,7 @@ def test_noeud_extract_journalise_le_refus_aucun_document_fiable(monkeypatch) ->
 
     resultat_extract = ResultatOutil(outil="extract", succes=True, message="ne devrait jamais être appelé")
     fabrique_extract, _ = _outil_extract_capture(resultat_extract)
-    fabrique_search, _ = _outil_search_avec_compteur(_SCORE_EVIDENCE_FORTE)
+    fabrique_search, _ = _outil_search_avec_compteur(_SCORE_EVIDENCE_FAIBLE)
 
     session = construire_session(
         "Donne-moi le montant.",
@@ -1129,11 +1245,13 @@ def test_noeud_extract_journalise_le_refus_aucun_document_fiable(monkeypatch) ->
 
     nodes.noeud_extract(etat)
 
+    # Passage retrouvé mais sous SEUIL_PERTINENCE_MINIMALE : aucun document retenu.
     assert session.contexte.resultats[-1].outil == "extract"
     assert session.etat.trace[-1].nom == "extract"
     assert session.etat.trace[-1].donnees["succes"] is False
-    assert session.etat.trace[-1].donnees["mode"] == "aucun_document_fiable"
+    assert session.etat.trace[-1].donnees["mode"] == "aucun_document_pertinent"
     assert session.etat.trace[-1].donnees["champs_demandes"] == ["montant"]
+
 
 
 # ---------------------------------------------------------------------------
