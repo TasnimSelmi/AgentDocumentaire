@@ -727,3 +727,28 @@ def test_generique_profil_fictif_sans_rapport_avec_taxonomie(monkeypatch):
     assert resultat.succes
     assert resultat.donnees["categorie"] == "Recette de cuisine"
     assert resultat.donnees["categories_autorisees"] == categories_fictives
+
+
+# ===========================================================================
+# max_lots — classement du corpus entier sur l'ouverture de chaque document
+# ===========================================================================
+
+
+def test_max_lots_ne_classe_que_les_premiers_lots_et_rend_la_justification(monkeypatch):
+    passages = [_passage("A", i, f"contenu {i}") for i in range(20)]
+    _resoudre_vers(monkeypatch, "A", passages)
+    monkeypatch.setattr(classify, "LIMITE_CARACTERES_LOT_CLASSIFY", 60)  # ~1 passage/lot -> 20 lots
+
+    llm = LLMVotes(["rapport", "rapport"] + [None] * 18)
+    resultat = classify.definir_classify().executer(
+        contexte=_contexte(llm),
+        categories=CATEGORIES,
+        documents=["A"],
+        max_lots=2,
+    )
+
+    assert len(llm.appels) == 2
+    assert resultat.donnees["nombre_total_lots"] == 2
+    assert resultat.donnees["categorie"] == "rapport"
+    assert resultat.donnees["justification"] == "ok"
+    assert resultat.message.endswith(" ok")

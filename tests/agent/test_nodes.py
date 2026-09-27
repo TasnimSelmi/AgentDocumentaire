@@ -1733,3 +1733,127 @@ def test_generer_reponse_ne_journalise_pas_contexte_suffisant_comme_tel(monkeypa
     assert "contexte_suffisant" not in donnees
     assert donnees["rag_contexte_structurellement_valide"] is True
     assert donnees["genere_par_llm"] is True
+
+
+# ---------------------------------------------------------------------------
+# noeud_classify — catégories de la requête, classement du corpus entier
+# ---------------------------------------------------------------------------
+
+_REQUETE_CLASSEMENT_CORPUS = (
+    "Classe les documents du corpus selon leur angle principal : adoption du "
+    "numérique, intelligence artificielle, cybersécurité, compétences, ou "
+    "productivité et obstacles."
+)
+
+
+class _LLMCategories:
+    """Doublure : répond toujours avec les catégories données."""
+
+    def __init__(self, categories: list[str]) -> None:
+        self.categories = categories
+        self.appels = 0
+
+    def invoke(self, messages: Any, **kwargs: Any):
+        self.appels += 1
+        return AIMessage(content=json.dumps({"categories": self.categories}))
+
+
+def test_categories_demandees_recopiees_et_jamais_inventees() -> None:
+    llm = _LLMCategories(
+        ["Intelligence artificielle", "cybersécurité", "Finance durable", "compétences"]
+    )
+
+    categories = nodes._categories_demandees(llm, _REQUETE_CLASSEMENT_CORPUS)
+
+    # « Finance durable » n'est pas dans la requête : écartée.
+    assert categories == ["Intelligence artificielle", "cybersécurité", "compétences"]
+
+
+def test_categories_demandees_sans_enumeration_pas_d_appel_llm() -> None:
+    llm = _LLMCategories(["a", "b"])
+
+    assert nodes._categories_demandees(llm, "Classe ce document.") == []
+    assert llm.appels == 0
+
+
+def test_categories_demandees_moins_de_deux_liste_vide() -> None:
+    llm = _LLMCategories(["cybersécurité"])
+
+    assert nodes._categories_demandees(llm, _REQUETE_CLASSEMENT_CORPUS) == []
+
+
+def test_noeud_classify_corpus_entier_categories_de_la_requete(monkeypatch) -> None:
+    """
+    « Classe les documents du corpus selon … : A, B, ou C » : chaque document
+    du catalogue est classé (ouverture du document, `max_lots`), avec les
+    catégories de la requête et la requête comme critère ; la réponse est
+    regroupée par catégorie, un paragraphe par document.
+    """
+    from src.rag.retrieval import FicheDocument
+
+    monkeypatch.setattr(
+        nodes,
+        "resoudre_document",
+        lambda requete, corpus_id=None: PerimetreDocumentaire(
+            statut="aucun", raison="aucune_correspondance"
+        ),
+    )
+
+    class _Catalogue:
+        fiches = [
+            FicheDocument(document_id="d2", champ_id="doc_id", nom_fichier="b_cyber.pdf"),
+            FicheDocument(document_id="d1", champ_id="doc_id", nom_fichier="a_ia.pdf"),
+        ]
+
+    monkeypatch.setattr(nodes, "catalogue", lambda corpus_id=None: _Catalogue())
+
+    reponses = {
+        "d1": ("intelligence artificielle", "Porte sur l'adoption de l'IA."),
+        "d2": ("cybersécurité", "Mesure la maturité cyber."),
+    }
+    appels: list[dict[str, Any]] = []
+
+    def _classify(*, contexte=None, **kw) -> ResultatOutil:
+        appels.append(kw)
+        categorie, justification = reponses[kw["documents"][0]]
+        return ResultatOutil(
+            outil="classify", succes=True, message="Document classifié.",
+            donnees={"categorie": categorie, "justification": justification, "citations": ["S1"]},
+        )
+
+    class _ArgsClassifyCorpus(_ArgsClassifyFactice):
+        documents: list[str] | None = None
+        max_lots: int | None = None
+
+    fabrique_classify = lambda: DefinitionOutil(  # noqa: E731
+        nom="classify", description="Classify factice.",
+        schema_arguments=_ArgsClassifyCorpus, fonction=_classify,
+    )
+    fabrique_search, compteur_recherche = _outil_search_avec_compteur(0.9)
+
+    categories = [
+        "adoption du numérique", "intelligence artificielle", "cybersécurité",
+        "compétences", "productivité et obstacles",
+    ]
+    session = construire_session(
+        _REQUETE_CLASSEMENT_CORPUS,
+        llm=_LLMCategories(categories),
+        charger_profil_domaine=False,
+        fabriques=[fabrique_search, fabrique_classify],
+    )
+    mise_a_jour = nodes.noeud_classify(EtatGraphe(session=session))
+
+    assert compteur_recherche[0] == 0
+    assert [appel["documents"] for appel in appels] == [["d1"], ["d2"]]
+    assert all(appel["categories"] == categories for appel in appels)
+    assert all(appel["critere"] == _REQUETE_CLASSEMENT_CORPUS for appel in appels)
+    assert all(appel["max_lots"] == nodes.MAX_LOTS_CORPUS for appel in appels)
+
+    reponse = mise_a_jour["reponse"]
+    assert reponse.message.split("\n\n") == [
+        "Classement de 2 documents : intelligence artificielle (1), cybersécurité (1).",
+        "[D1] a_ia.pdf → intelligence artificielle. Porte sur l'adoption de l'IA.",
+        "[D2] b_cyber.pdf → cybersécurité. Mesure la maturité cyber.",
+    ]
+    assert not any("Aucun document désigné" in a for a in reponse.avertissements)
+    assert session.etat.trace[-1].donnees["mode"] == nodes.MODE_CORPUS_ENTIER

@@ -139,6 +139,17 @@ class ArgumentsClassify(BaseModel):
         ),
     )
 
+    max_lots: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Avec 'documents' uniquement : ne classifie que les N premiers "
+            "lots du document (titre, synthèse, introduction), qui portent "
+            "son angle principal. Borne le coût d'un classement de tout le "
+            "corpus. Si absent, le document est classifié en entier."
+        ),
+    )
+
 
 # ===========================================================================
 # 2. Utilitaires documentaires
@@ -532,6 +543,7 @@ def _executer_classify(
     documents: list[str] | None = None,
     critere: str | None = None,
     instruction: str | None = None,
+    max_lots: int | None = None,
 ) -> ResultatOutil:
     """
     Point d'entrée de l'outil classify.
@@ -579,6 +591,7 @@ def _executer_classify(
             documents=documents_nettoyes,
             critere=critere,
             instruction=instruction,
+            max_lots=max_lots,
         )
 
     # --- Cas B : classification des sources déjà disponibles --------------
@@ -783,6 +796,7 @@ def _executer_classify(
     else:
         message = (
             f"Document classifié dans la catégorie « {categorie} »."
+            + (f" {justification}" if justification else "")
         )
 
     return ResultatOutil(
@@ -932,6 +946,7 @@ class VoteLot:
     citations: list[str] = field(default_factory=list)
     valide: bool = False
     erreur: str | None = None
+    justification: str = ""
 
 
 def _classifier_lot(
@@ -1011,6 +1026,7 @@ def _classifier_lot(
         categorie=categorie,
         citations=citations,
         valide=True,
+        justification=" ".join(str(resultat_llm.get("justification") or "").split()),
     )
 
 
@@ -1113,6 +1129,7 @@ def _executer_classify_document_complet(
     documents: list[str],
     critere: str | None,
     instruction: str | None,
+    max_lots: int | None = None,
 ) -> ResultatOutil:
     """
     Classifie un document explicitement nommé, dans son intégralité —
@@ -1161,6 +1178,10 @@ def _executer_classify_document_complet(
     paires = list(sources_par_citation.items())
 
     lots = _partitionner_document(paires, LIMITE_CARACTERES_LOT_CLASSIFY)
+    # `max_lots` : seuls les premiers lots (ouverture du document) votent ;
+    # la majorité absolue se calcule alors sur ces lots uniquement.
+    if max_lots:
+        lots = lots[:max_lots]
 
     votes = [
         _classifier_lot(
@@ -1195,6 +1216,14 @@ def _executer_classify_document_complet(
         else []
     )
     sources_utilisees = [sources_par_citation[c] for c in citations_gagnantes]
+    justification = next(
+        (
+            v.justification
+            for v in votes
+            if v.valide and v.categorie == verdict.categorie and v.justification
+        ),
+        "",
+    ) if verdict.categorie is not None else ""
 
     avertissements: list[str] = []
     lots_en_erreur = [v for v in votes if v.erreur]
@@ -1227,6 +1256,7 @@ def _executer_classify_document_complet(
             f"{verdict.total_lots} lot(s) au total en sa faveur — majorité absolue "
             f"atteinte ({verdict.lots_valides} lot(s) valide(s), "
             f"{verdict.lots_invalides} invalide(s))."
+            + (f" {justification}" if justification else "")
         )
 
     return ResultatOutil(
@@ -1237,6 +1267,7 @@ def _executer_classify_document_complet(
             "document": nom_document,
             "categorie": verdict.categorie,
             "raison_abstention": verdict.raison,
+            "justification": justification,
             "categories_autorisees": categories,
             "citations": citations_gagnantes,
             "nombre_passages": len(passages),
@@ -1281,4 +1312,4 @@ def definir_classify() -> DefinitionOutil:
         fonction=_executer_classify,
         lecture_seule=True,
         actif=True,
-    )
+    )
