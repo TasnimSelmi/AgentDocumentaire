@@ -33,6 +33,25 @@ Principe de discrimination (le point délicat) :
 
     « Dans ces documents, quelle est la date limite de dépôt ? »
         -> « ces documents » => multi-doc, mais aucune opération => hint none
+
+P1.9 — portée INTRA-document. Une comparaison ou une synthèse peut aussi
+porter sur les parties d'UN SEUL document désigné (nom de fichier, déixis
+singulière ou résolution catalogue unique). `is_multidoc` garde son sens
+(plusieurs documents distincts) ; la portée est portée par `portee` :
+
+    « Compare les deux méthodes décrites dans rapport_alpha.pdf. »
+        -> 1 document + marqueur comparatif STRICT => COMPARE, portée intra
+
+    « Synthétise les différents chapitres de ce rapport. »
+        -> 1 document + marqueur de synthèse + parties plurielles
+           => SYNTHESIZE, portée intra
+
+    « Peux-tu synthétiser rapport_alpha.pdf ? »
+        -> 1 document, synthèse SANS parties => aucune opération (SUMMARIZE)
+
+Le `resolveur` injecté (catalogue du corpus, lecture seule) permet aussi de
+désigner les documents SANS nom de fichier ; il n'est sollicité que si la
+requête porte un marqueur de comparaison ou de synthèse.
 """
 
 from __future__ import annotations
@@ -49,6 +68,11 @@ from typing import Callable, Iterable
 HINT_COMPARE = "compare"
 HINT_SYNTHESIZE = "synthesize"
 HINT_AUCUN = "none"
+
+# Valeurs de `portee` (P1.9)
+PORTEE_INTER = "inter"  # plusieurs documents distincts
+PORTEE_INTRA = "intra"  # parties d'un même document
+PORTEE_AUCUNE = "aucune"
 
 # --------------------------------------------------------------------------
 # Vocabulaire (générique, bilingue, sans terme métier)
@@ -104,6 +128,14 @@ _MOTIFS_DEIXIS_SINGULIER = (
     re.compile(rf"\b(?:du|de\s+ce|of\s+this|dans\s+ce|in\s+this)\s+(?:{_ALT_DOC})\b"),
 )
 
+# Déixis DÉMONSTRATIVE uniquement (P1.9) : seule une désignation explicite
+# (« ce rapport », « this document ») ouvre la portée intra-document sans
+# document résolu. L'article défini (« le contrat ») reste trop faible :
+# « différence entre le contrat CDD et le CDI » est une question factuelle.
+_MOTIFS_DEIXIS_DEMONSTRATIVE = (
+    re.compile(rf"\b(?:ce|cet|cette|this)\s+(?:{_ALT_DOC})\b"),
+)
+
 # Marqueurs de COMPARAISON (sous-chaînes sur texte normalisé).
 _MARQUEURS_COMPARE = (
     "compare", "comparer", "comparez", "comparons", "comparaison",
@@ -134,6 +166,29 @@ _MARQUEURS_SYNTHESE = (
     "resume commun", "synthese commune", "bilan croise",
 )
 
+# Marqueurs comparatifs STRICTS pour la portée intra-document (P1.9). Sous-
+# ensemble volontairement plus étroit que `_MARQUEURS_COMPARE` : dans un seul
+# document, « les différents axes », « en quoi consiste… » ou « lequel des
+# dispositifs… » sont des questions factuelles (SEARCH), pas des comparaisons.
+_MARQUEURS_COMPARE_INTRA = (
+    "compare", "comparer", "comparez", "comparons", "comparaison",
+    "compares", "comparing", "compared",
+    "differences", "difference entre", "difference between",
+    "ecarts entre", "ecart entre",
+    "points communs", "point commun", "in common", "common points",
+    "similitudes", "similarites", "similarities",
+    "versus", " vs ", " vs.", "mettre en regard", "confronte", "confronter",
+)
+
+# Parties d'un document (pluriel) : une synthèse intra-document doit viser
+# EXPLICITEMENT plusieurs parties — sinon « synthétise ce document » reste un
+# résumé (SUMMARIZE), comportement historique inchangé.
+_MOTIF_PARTIES_DOCUMENT = re.compile(
+    r"\b(?:sections|chapitres|parties|volets|annexes|"
+    r"chapters|parts|appendices)\b"
+    r"|\btransversal(?:e|es|ement)?\b|\bacross\b"
+)
+
 
 # --------------------------------------------------------------------------
 # Résultat
@@ -153,13 +208,20 @@ class SignalMultiDoc:
     marqueurs_synthese: tuple[str, ...] = field(default_factory=tuple)
     confiance: str = "faible"  # "haute" | "moyenne" | "faible"
     raison: str = ""
+    # P1.9 — PORTEE_INTER | PORTEE_INTRA | PORTEE_AUCUNE ; `documents_cibles` :
+    # références explicites + identifiants résolus par le `resolveur`, à
+    # transmettre aux outils compare / synthesize.
+    portee: str = PORTEE_AUCUNE
+    documents_cibles: tuple[str, ...] = field(default_factory=tuple)
 
     def vers_dict(self) -> dict:
         return {
             "is_multidoc": self.is_multidoc,
             "operation_hint": self.operation_hint,
+            "portee": self.portee,
             "nombre_documents": self.nombre_documents,
             "references_detectees": list(self.references_detectees),
+            "documents_cibles": list(self.documents_cibles),
             "marqueur_pluriel": self.marqueur_pluriel,
             "marqueurs_compare": list(self.marqueurs_compare),
             "marqueurs_synthese": list(self.marqueurs_synthese),
@@ -249,12 +311,23 @@ def detecter_multidoc(
     extrait_pluriel, nombre_pluriel = _marqueur_pluriel(normalisee)
     deixis_singuliere = any(m.search(normalisee) for m in _MOTIFS_DEIXIS_SINGULIER)
 
+    marqueurs_c = _sous_chaines_presentes(normalisee, _MARQUEURS_COMPARE)
+    marqueurs_s = _sous_chaines_presentes(normalisee, _MARQUEURS_SYNTHESE)
+
+    # Le résolveur (catalogue) n'est sollicité que pour une demande de
+    # comparaison / synthèse : il ne pèse jamais sur une requête factuelle.
     refs_resolveur: tuple[str, ...] = ()
-    if resolveur is not None and len(references) < 2:
+    if resolveur is not None and len(references) < 2 and (marqueurs_c or marqueurs_s):
         try:
             refs_resolveur = tuple(dict.fromkeys(str(r) for r in resolveur(original) if r))
         except Exception:  # noqa: BLE001 — un résolveur défaillant ne casse rien
             refs_resolveur = ()
+
+    # Références explicites + résolues, dédupliquées sans tenir compte de la casse.
+    cibles: list[str] = []
+    for ref in (*references, *refs_resolveur):
+        if ref.lower() not in {c.lower() for c in cibles}:
+            cibles.append(ref)
 
     # --- Décision is_multidoc -------------------------------------------------
     raisons: list[str] = []
@@ -265,40 +338,59 @@ def detecter_multidoc(
         raisons.append(f"{len(references)} références explicites : {', '.join(references)}")
     elif extrait_pluriel and not deixis_singuliere:
         is_multidoc = True
-        nombre_documents = nombre_pluriel
+        nombre_documents = max(nombre_pluriel, len(cibles))
         confiance = "moyenne"
         raisons.append(f"marqueur pluriel « {extrait_pluriel} »")
-    elif len(refs_resolveur) >= 2:
+    elif len(cibles) >= 2:
         is_multidoc = True
-        nombre_documents = len(refs_resolveur)
+        nombre_documents = len(cibles)
         confiance = "moyenne"
-        raisons.append(f"{len(refs_resolveur)} documents résolus par le résolveur injecté")
+        raisons.append(f"{len(cibles)} documents désignés (dont résolveur injecté)")
     else:
         is_multidoc = False
-        nombre_documents = 1 if (len(references) == 1 or deixis_singuliere) else 0
+        nombre_documents = 1 if (cibles or deixis_singuliere) else 0
         confiance = "faible"
         if deixis_singuliere:
             raisons.append("déixis singulière (« ce document »/« this report »…)")
         elif len(references) == 1:
             raisons.append(f"une seule référence : {references[0]}")
+        elif cibles:
+            raisons.append(f"un seul document résolu : {cibles[0]}")
         else:
             raisons.append("aucune référence ni marqueur pluriel")
 
-    # --- operation_hint (uniquement si multi-doc) ---------------------------
-    marqueurs_c = _sous_chaines_presentes(normalisee, _MARQUEURS_COMPARE)
-    marqueurs_s = _sous_chaines_presentes(normalisee, _MARQUEURS_SYNTHESE)
-
-    if not is_multidoc:
-        operation_hint = HINT_AUCUN
-    elif marqueurs_c:
-        operation_hint = HINT_COMPARE
-        raisons.append(f"marqueur(s) comparatif(s) : {', '.join(marqueurs_c)}")
-    elif marqueurs_s:
-        operation_hint = HINT_SYNTHESIZE
-        raisons.append(f"marqueur(s) de synthèse : {', '.join(m.strip() for m in marqueurs_s)}")
+    # --- operation_hint + portée ---------------------------------------------
+    portee = PORTEE_AUCUNE
+    if is_multidoc:
+        if marqueurs_c:
+            operation_hint = HINT_COMPARE
+            raisons.append(f"marqueur(s) comparatif(s) : {', '.join(marqueurs_c)}")
+        elif marqueurs_s:
+            operation_hint = HINT_SYNTHESIZE
+            raisons.append(f"marqueur(s) de synthèse : {', '.join(m.strip() for m in marqueurs_s)}")
+        else:
+            operation_hint = HINT_AUCUN
+            raisons.append("multi-doc sans marqueur d'opération (lecture factuelle probable)")
+        if operation_hint != HINT_AUCUN:
+            portee = PORTEE_INTER
     else:
         operation_hint = HINT_AUCUN
-        raisons.append("multi-doc sans marqueur d'opération (lecture factuelle probable)")
+        # P1.9 — portée intra : UN document désigné (référence, résolution
+        # unique ou déixis démonstrative), aucun marqueur pluriel de document.
+        document_unique = extrait_pluriel is None and (
+            len(cibles) == 1
+            or any(m.search(normalisee) for m in _MOTIFS_DEIXIS_DEMONSTRATIVE)
+        )
+        marqueurs_ci = _sous_chaines_presentes(normalisee, _MARQUEURS_COMPARE_INTRA)
+        parties = _MOTIF_PARTIES_DOCUMENT.search(normalisee)
+        if document_unique and marqueurs_ci:
+            operation_hint, portee = HINT_COMPARE, PORTEE_INTRA
+            raisons.append(
+                "comparaison intra-document : " + ", ".join(m.strip() for m in marqueurs_ci)
+            )
+        elif document_unique and marqueurs_s and parties:
+            operation_hint, portee = HINT_SYNTHESIZE, PORTEE_INTRA
+            raisons.append(f"synthèse intra-document sur « {parties.group(0)} »")
 
     return SignalMultiDoc(
         is_multidoc=is_multidoc,
@@ -310,4 +402,6 @@ def detecter_multidoc(
         marqueurs_synthese=marqueurs_s,
         confiance=confiance,
         raison=" ; ".join(raisons),
+        portee=portee,
+        documents_cibles=tuple(cibles),
     )

@@ -395,3 +395,112 @@ def test_valider_map_result_json_pas_un_objet() -> None:
     r = mp._valider_map_result("pas un dict", axes={"montants"}, citations_du_lot={"D1S1"})
     assert not r.pertinent
     assert r.elements == ()
+
+
+# --------------------------------------------------------------------------
+# P1.9 — portée intra-document et résolveur catalogue
+# --------------------------------------------------------------------------
+
+from src.rag.retrieval import FicheDocument, PerimetreDocumentaire  # noqa: E402
+from tests.agent._multidoc_fakes import FauxCatalogue  # noqa: E402
+
+
+def _cabler_catalogue(monkeypatch, catalogue_factice) -> None:
+    monkeypatch.setattr(mp, "catalogue", lambda profil=None, corpus_id=None: catalogue_factice)
+
+
+def test_resoudre_cibles_intra_accepte_un_seul_document(monkeypatch) -> None:
+    _cabler_catalogue(monkeypatch, FauxCatalogue({"a.pdf": "A", "b.pdf": "B"}))
+    r = mp.resoudre_cibles(["a.pdf"], portee="intra")
+    assert r.refus is None and r.exploitable
+    assert [c.doc_id for c in r.documents] == ["A"]
+    assert r.portee == "intra"
+
+
+def test_resoudre_cibles_intra_sans_document_refuse(monkeypatch) -> None:
+    _cabler_catalogue(monkeypatch, FauxCatalogue({"a.pdf": "A"}))
+    r = mp.resoudre_cibles([], portee="intra")
+    assert r.motif == "references_insuffisantes"
+    assert not r.exploitable
+
+
+def test_resoudre_cibles_intra_refuse_plusieurs_documents(monkeypatch) -> None:
+    _cabler_catalogue(monkeypatch, FauxCatalogue({"a.pdf": "A", "b.pdf": "B"}))
+    r = mp.resoudre_cibles(["a.pdf", "b.pdf"], portee="intra")
+    assert r.motif == "intra_plusieurs_documents"
+
+
+def test_resoudre_cibles_inter_exige_toujours_deux_documents(monkeypatch) -> None:
+    _cabler_catalogue(monkeypatch, FauxCatalogue({"a.pdf": "A"}))
+    r = mp.resoudre_cibles(["a.pdf"])
+    assert r.motif == "references_insuffisantes"
+
+
+class _CatalogueResolvant(FauxCatalogue):
+    """Résout chaque fragment contenant un mot-clé vers un document."""
+
+    def __init__(self, fiches_par_nom: dict[str, str], motcles: dict[str, str]) -> None:
+        super().__init__(fiches_par_nom)
+        self._motcles = motcles  # {mot-clé: nom de fichier}
+        self.fragments: list[str] = []
+
+    def resoudre(self, fragment: str) -> PerimetreDocumentaire:
+        self.fragments.append(fragment)
+        trouves = [nom for mot, nom in self._motcles.items() if mot in fragment.lower()]
+        if len(trouves) != 1:
+            return PerimetreDocumentaire(statut="ambigu" if trouves else "aucun")
+        return PerimetreDocumentaire(
+            statut="exact", champ_filtre="document_id", valeurs_filtre=(self._m[trouves[0]],)
+        )
+
+    def par_identifiant(self, identifiant: str) -> FicheDocument | None:
+        for nom, doc_id in self._m.items():
+            if identifiant in (nom, doc_id):
+                return FicheDocument(document_id=doc_id, champ_id="document_id", nom_fichier=nom)
+        return None
+
+
+def test_resolveur_catalogue_resout_fragment_par_fragment(monkeypatch) -> None:
+    cat = _CatalogueResolvant(
+        {"barometre.pdf": "A", "etude.pdf": "B"},
+        {"barometre": "barometre.pdf", "etude": "etude.pdf"},
+    )
+    _cabler_catalogue(monkeypatch, cat)
+
+    # La requête entière est ambiguë ; chaque fragment désigne un document.
+    trouves = mp.resolveur_catalogue("default")("Compare le barometre et l'etude")
+
+    assert trouves == ("barometre.pdf", "etude.pdf")
+    assert "Compare le barometre et l'etude" in cat.fragments
+
+
+def test_resolveur_catalogue_ignore_les_perimetres_non_fiables(monkeypatch) -> None:
+    cat = _CatalogueResolvant({"a.pdf": "A"}, {"alpha": "a.pdf"})
+    _cabler_catalogue(monkeypatch, cat)
+    assert mp.resolveur_catalogue("default")("Compare les rapports trimestriels") == ()
+
+
+def test_resolveur_catalogue_resultat_reconnu_par_resoudre_cibles(monkeypatch) -> None:
+    cat = _CatalogueResolvant({"a.pdf": "A"}, {"alpha": "a.pdf"})
+    _cabler_catalogue(monkeypatch, cat)
+    refs = mp.resolveur_catalogue("default")("Compare les sections du rapport alpha")
+    r = mp.resoudre_cibles(refs, portee="intra")
+    assert [c.doc_id for c in r.documents] == ["A"]
+
+
+def test_plan_intra_utilise_le_prompt_et_le_repli_intra() -> None:
+    cible = DocumentCible(index=1, doc_id="A", libelle="Rapport A", nom_fichier="a.pdf")
+
+    repli = mp.planifier("synthesize", "Synthétise les chapitres.", [cible], llm=None, portee="intra")
+    assert repli.axes == mp._AXES_REPLI_INTRA["synthesize"]
+
+    llm = LLMScripte()
+    mp.planifier("compare", "Compare 2023 et 2024.", [cible], llm=llm, portee="intra")
+    assert "PARTIES D'UN SEUL document" in llm.appels[0][0]
+
+
+def test_plan_inter_inchange() -> None:
+    cible = DocumentCible(index=1, doc_id="A", libelle="Rapport A", nom_fichier="a.pdf")
+    llm = LLMScripte()
+    mp.planifier("compare", "Compare A et B.", [cible], llm=llm)
+    assert llm.appels[0][0] == mp._SYSTEME_PLAN

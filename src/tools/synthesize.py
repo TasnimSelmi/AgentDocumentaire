@@ -2,7 +2,8 @@
 Capacité SYNTHESIZE (étape P1.5).
 
 Produit une synthèse transversale de 2 à 4 documents ciblés par
-l'utilisateur. Même structure que COMPARE : MAP par document (via
+l'utilisateur — ou, depuis P1.9 (`portee="intra"`), des différentes parties
+d'UN même document. Même structure que COMPARE : MAP par document (via
 `multidoc_pipeline`) -> REDUCE inter-document -> `ResultatOutil` avec
 provenance par document.
 
@@ -20,6 +21,7 @@ from typing import Any, Literal, Sequence
 from src.llm.common import bloc_profil_domaine, extraire_json_objet, invoquer_llm
 from src.tools.base import ResultatOutil, SourceOutil
 
+from src.agent.multidoc import PORTEE_INTER, PORTEE_INTRA
 from src.agent.multidoc_pipeline import (
     bloc_maps_pour_reduce,
     budget_caracteres_entree_llm,
@@ -52,6 +54,7 @@ class ResultatSynthese:
     synthese_transversale: str | None = None
     documents_sans_evidence: list[str] = field(default_factory=list)
     documents_en_echec: list[str] = field(default_factory=list)
+    portee: str = PORTEE_INTER
 
 
 _SYSTEME_REDUCE = """Tu produis une SYNTHÈSE TRANSVERSALE de plusieurs documents à partir d'analyses déjà réalisées, une par document.
@@ -75,9 +78,30 @@ Réponds UNIQUEMENT avec un objet JSON strict :
 }"""
 
 
-def _systeme_reduce(profil_domaine: Any | None) -> str:
+_SYSTEME_REDUCE_INTRA = """Tu produis une SYNTHÈSE TRANSVERSALE des différentes parties d'UN SEUL document à partir d'une analyse déjà réalisée de ce document, organisée par axe.
+
+RÈGLES ABSOLUES
+- Utilise UNIQUEMENT l'analyse fournie ci-dessous. Tu n'as pas accès au document complet ni à aucune autre source.
+- N'invente aucun fait, chiffre, recommandation ou conclusion.
+- Chaque élément (thème commun, complément, divergence, phrase de synthèse) DOIT porter au moins une citation [D_S_] reprise de l'analyse.
+- "themes_communs" : thèmes qui reviennent dans PLUSIEURS parties du document, chacun soutenu par des citations de ces différentes parties.
+- "elements_complementaires" : apports propres à une partie, qui complètent les autres.
+- Si le document se contredit ou évolue d'une partie à l'autre, CONSERVE la divergence dans "divergences" — ne la lisse pas, ne choisis pas un camp.
+- "synthese_transversale" : un paragraphe court qui articule les points ci-dessus, avec citations. Mets null si l'analyse ne permet pas une synthèse honnête.
+
+Réponds UNIQUEMENT avec un objet JSON strict :
+{
+  "themes_communs": ["... [D1S1][D1S8]", ...],
+  "elements_complementaires": ["... [D1S3]", ...],
+  "divergences": ["La partie ... indique ... [D1S2] alors que la partie ... indique ... [D1S9]", ...],
+  "synthese_transversale": "... [D1S1][D1S8]" | null
+}"""
+
+
+def _systeme_reduce(profil_domaine: Any | None, portee: str = PORTEE_INTER) -> str:
+    base = _SYSTEME_REDUCE_INTRA if portee == PORTEE_INTRA else _SYSTEME_REDUCE
     bloc = bloc_profil_domaine(profil_domaine)
-    return f"{_SYSTEME_REDUCE}\n\n{bloc}" if bloc else _SYSTEME_REDUCE
+    return f"{base}\n\n{bloc}" if bloc else base
 
 
 def _liste_str(valeur: Any) -> list[str]:
@@ -107,6 +131,7 @@ def synthetiser_documents(
     profil_domaine: Any | None = None,
     corpus_id: str = "default",
     strategy: Literal["map_reduce", "contextual", "hybrid"] = "map_reduce",
+    portee: str = PORTEE_INTER,
 ) -> ResultatOutil:
     """
     Point d'entrée SYNTHESIZE. `references` = noms de fichiers explicites du
@@ -145,11 +170,12 @@ def synthetiser_documents(
             profil_domaine=profil_domaine,
             repli=lambda: synthetiser_documents(
                 question, references, llm=llm, profil_domaine=profil_domaine,
-                corpus_id=corpus_id, strategy="map_reduce",
+                corpus_id=corpus_id, strategy="map_reduce", portee=portee,
             ),
         )
 
-    resolution = resoudre_cibles(references, corpus_id=corpus_id)
+    intra = portee == PORTEE_INTRA
+    resolution = resoudre_cibles(references, corpus_id=corpus_id, portee=portee)
     if resolution.refus is not None:
         return ResultatOutil.echec(_OUTIL, resolution.refus, motif=resolution.motif)
 
@@ -161,7 +187,9 @@ def synthetiser_documents(
         question,
         llm=llm,
         profil_domaine=profil_domaine,
+        operation="synthesize",
         corpus_id=corpus_id,
+        portee=portee,
     )
     utilisables, sans_evidence, echecs = diagnostic_maps(maps)
 
@@ -189,10 +217,11 @@ def synthetiser_documents(
     statut = STATUT_PARTIEL if (sans_evidence or echecs) else STATUT_COMPLET
 
     autorisees = citations_autorisees(maps)
-    systeme = _systeme_reduce(profil_domaine)
+    systeme = _systeme_reduce(profil_domaine, portee)
     utilisateur = (
         f"QUESTION / OBJECTIF DE SYNTHÈSE\n{question}\n\n"
-        f"ANALYSES PAR DOCUMENT\n{bloc_maps_pour_reduce(maps)}\n\n"
+        + ("ANALYSE DU DOCUMENT (par axe)\n" if intra else "ANALYSES PAR DOCUMENT\n")
+        + f"{bloc_maps_pour_reduce(maps)}\n\n"
         "Produis maintenant l'objet JSON de synthèse transversale."
     )
 
@@ -262,6 +291,7 @@ def synthetiser_documents(
         synthese_transversale=synthese,
         documents_sans_evidence=sans_evidence,
         documents_en_echec=echecs,
+        portee=portee,
     )
 
     avertissements: list[str] = []
@@ -279,7 +309,9 @@ def synthetiser_documents(
             f"{len(rejets)} affirmation(s) sans citation valide écartée(s)."
         )
 
-    if statut == STATUT_PARTIEL:
+    if intra:
+        message = f"Synthèse transversale du document « {maps[0].cible.libelle} »."
+    elif statut == STATUT_PARTIEL:
         message = (
             f"Synthèse partielle : {len(utilisables)}/{len(maps)} document(s) "
             "apportent des éléments exploitables ; voir les limitations."

@@ -320,3 +320,45 @@ def test_compare_documents_volumineux_couverts_en_entier(monkeypatch) -> None:
     pages = {s.page for s in r.sources}
     assert pages - {1}  # au moins une page > 1 citée
     assert {s.doc_id for s in r.sources} <= {"A", "B"}
+
+
+# --------------------------------------------------------------------------
+# P1.9 — portée intra-document
+# --------------------------------------------------------------------------
+
+
+def test_comparaison_intra_un_seul_document(monkeypatch) -> None:
+    _corpus_2(monkeypatch)
+    llm = LLMScripte()
+    r = comparer(
+        "Compare les deux méthodes décrites dans rapport_a.pdf.",
+        ["rapport_a.pdf"],
+        llm=llm,
+        portee="intra",
+    )
+    assert r.succes
+    comp = r.donnees["comparaison"]
+    assert comp["portee"] == "intra"
+    assert comp["documents"] == ["rapport_a.pdf"]
+    assert {s.doc_id for s in r.sources} == {"A"}  # jamais l'autre document
+    assert "rapport_a.pdf" in r.message
+    plans = [u for s, u in llm.appels if "prépares le PLAN" in s]
+    assert plans and "OPÉRATION\ncompare" in plans[0]
+    reduce = [u for s, u in llm.appels if "éléments d'UN SEUL document" in s]
+    assert reduce and "ANALYSE DU DOCUMENT (par axe)" in reduce[0]
+
+
+def test_comparaison_inter_inchangee_refuse_un_seul_document(monkeypatch) -> None:
+    _corpus_2(monkeypatch)
+    r = comparer("Compare rapport_a.pdf.", ["rapport_a.pdf"], llm=LLMScripte())
+    assert not r.succes
+    assert r.donnees.get("motif") == "references_insuffisantes"
+
+
+def test_comparaison_intra_refuse_plusieurs_documents(monkeypatch) -> None:
+    _corpus_2(monkeypatch)
+    r = comparer(
+        "Compare les sections.", ["rapport_a.pdf", "rapport_b.pdf"], llm=LLMScripte(), portee="intra"
+    )
+    assert not r.succes
+    assert r.donnees.get("motif") == "intra_plusieurs_documents"

@@ -50,8 +50,9 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence
 
+from src.agent.multidoc import PORTEE_INTER, PORTEE_INTRA
 from src.config import get_settings
 from src.llm.common import bloc_profil_domaine, extraire_json_objet, invoquer_llm
 from src.rag.retrieval import (
@@ -153,10 +154,12 @@ class ResolutionCibles:
     documents: list[DocumentCible] = field(default_factory=list)
     refus: str | None = None  # message d'abstention deterministe si non-None
     motif: str = ""
+    portee: str = PORTEE_INTER
 
     @property
     def exploitable(self) -> bool:
-        return self.refus is None and len(self.documents) >= MINIMUM_DOCUMENTS
+        minimum = 1 if self.portee == PORTEE_INTRA else MINIMUM_DOCUMENTS
+        return self.refus is None and len(self.documents) >= minimum
 
 
 # --------------------------------------------------------------------------
@@ -237,30 +240,93 @@ class MapDocument:
 # --------------------------------------------------------------------------
 
 
+def resolveur_catalogue(corpus_id: str = "default") -> Callable[[str], tuple[str, ...]]:
+    """
+    Résolveur injectable dans `detecter_multidoc` (P1.9) : désigne les
+    documents d'une requête SANS nom de fichier exact, via la résolution
+    documentaire publique du catalogue (`CatalogueDocuments.resoudre`,
+    lecture seule, cœur RAG non modifié).
+
+    La résolution du catalogue renvoie UN périmètre par texte ; une requête
+    qui cite plusieurs documents (« le rapport X et le baromètre Y ») est donc
+    aussi résolue fragment par fragment (`_SEPARATEURS_DOCUMENTS`). Seuls les
+    périmètres fiables (`contraignant`) sont retenus ; ambigu ou sous le
+    seuil -> rien. Renvoie des noms de fichiers (à défaut, identifiants),
+    reconnus tels quels par `resoudre_cibles`.
+    """
+
+    def _resoudre(requete: str) -> tuple[str, ...]:
+        cat = catalogue(corpus_id=corpus_id)
+        fragments = [requete, *(f for f in _SEPARATEURS_DOCUMENTS.split(requete) if f.strip())]
+        trouves: list[str] = []
+        for fragment in dict.fromkeys(fragments):
+            perimetre = cat.resoudre(fragment)
+            if not perimetre.contraignant:
+                continue
+            for valeur in perimetre.valeurs_filtre:
+                fiche = cat.par_identifiant(valeur)
+                nom = (fiche.nom_fichier or fiche.document_id) if fiche is not None else valeur
+                if nom and nom not in trouves:
+                    trouves.append(nom)
+        return tuple(trouves)
+
+    return _resoudre
+
+
+#: Coordinations génériques séparant deux désignations de documents dans une
+#: requête (FR/EN). Aucun vocabulaire métier.
+_SEPARATEURS_DOCUMENTS = re.compile(
+    r",|;|\bet\b|\band\b|\bvs\.?|\bversus\b|\bavec\b|\bwith\b"
+    r"|\bpar rapport (?:a|à|au|aux)\b|\bface (?:a|à|au|aux)\b",
+    re.IGNORECASE,
+)
+
+
 def resoudre_cibles(
-    references: Sequence[str], corpus_id: str = "default"
+    references: Sequence[str],
+    corpus_id: str = "default",
+    *,
+    portee: str = PORTEE_INTER,
 ) -> ResolutionCibles:
     """
-    Résout des références de fichiers explicites (issues du signal P1.4) en
-    documents indexés DANS LE CORPUS `corpus_id` — jamais dans un autre.
-    N'accepte que 2 à `LIMITE_DOCUMENTS` documents distincts et fiables —
-    sinon abstention déterministe, jamais de repli silencieux vers un
-    search global.
+    Résout des références (noms de fichiers explicites ou documents désignés
+    par `resolveur_catalogue`) en documents indexés DANS LE CORPUS
+    `corpus_id` — jamais dans un autre. Portée ``inter`` : 2 à
+    `LIMITE_DOCUMENTS` documents distincts et fiables. Portée ``intra``
+    (P1.9) : exactement UN document. Sinon abstention déterministe, jamais de
+    repli silencieux vers un search global.
     """
+    intra = portee == PORTEE_INTRA
+    minimum = 1 if intra else MINIMUM_DOCUMENTS
+
     brutes: list[str] = []
     for ref in references:
         ref = " ".join(str(ref).split())
         if ref and ref.lower() not in {b.lower() for b in brutes}:
             brutes.append(ref)
 
-    if len(brutes) < MINIMUM_DOCUMENTS:
+    if len(brutes) < minimum:
         return ResolutionCibles(
             refus=(
-                "Une comparaison ou une synthèse inter-documents demande au moins "
-                f"{MINIMUM_DOCUMENTS} documents explicitement nommés. Précise les "
-                "documents visés (par leur nom de fichier)."
+                "Une comparaison ou une synthèse au sein d'un document demande de "
+                "désigner ce document (nom, titre ou organisation)."
+                if intra
+                else "Une comparaison ou une synthèse inter-documents demande au moins "
+                f"{MINIMUM_DOCUMENTS} documents clairement désignés. Précise les "
+                "documents visés (nom de fichier, titre ou organisation)."
             ),
             motif="references_insuffisantes",
+            portee=portee,
+        )
+
+    if intra and len(brutes) > 1:
+        return ResolutionCibles(
+            refus=(
+                "Une comparaison ou une synthèse au sein d'un document porte sur "
+                f"UN seul document ; la requête en désigne {len(brutes)}."
+            ),
+            motif="intra_plusieurs_documents",
+            portee=portee,
         )
 
     if len(brutes) > LIMITE_DOCUMENTS:
@@ -271,6 +337,7 @@ def resoudre_cibles(
                 "Restreins la demande."
             ),
             motif="au_dela_limite",
+            portee=portee,
         )
 
     try:
@@ -279,6 +346,7 @@ def resoudre_cibles(
         return ResolutionCibles(
             refus=f"Catalogue documentaire indisponible : {exc}",
             motif="catalogue_indisponible",
+            portee=portee,
         )
 
     fiches: list[tuple[str, Any]] = []
@@ -298,6 +366,7 @@ def resoudre_cibles(
                 + ". Vérifie les noms."
             ),
             motif="document_introuvable",
+            portee=portee,
         )
 
     # Déduplication sur le doc_id réel (deux références pointant le même
@@ -318,16 +387,17 @@ def resoudre_cibles(
             )
         )
 
-    if len(cibles) < MINIMUM_DOCUMENTS:
+    if len(cibles) < minimum:
         return ResolutionCibles(
             refus=(
                 "Les références fournies désignent moins de "
                 f"{MINIMUM_DOCUMENTS} documents distincts."
             ),
             motif="documents_non_distincts",
+            portee=portee,
         )
 
-    return ResolutionCibles(documents=cibles, motif="ok")
+    return ResolutionCibles(documents=cibles, motif="ok", portee=portee)
 
 
 # --------------------------------------------------------------------------
@@ -345,8 +415,19 @@ RÈGLES ABSOLUES
 - Reste générique : n'utilise ni règle métier ni particularité d'un domaine ou d'un jeu de données précis."""
 
 
-def _systeme_plan() -> str:
-    return _SYSTEME_PLAN
+_SYSTEME_PLAN_INTRA = f"""Tu prépares le PLAN d'une comparaison ou d'une synthèse portant sur les PARTIES D'UN SEUL document (sections, périodes, options, approches, acteurs…). Tu NE VOIS PAS le contenu du document : seulement son nom et la demande de l'utilisateur.
+
+RÈGLES ABSOLUES
+- Réponds UNIQUEMENT avec un objet JSON strict, de la forme :
+  {{"objectif": "...", "axes": ["...", ...], "informations_attendues": ["...", ...]}}
+- "axes" : entre 1 et {NB_AXES_MAX} éléments CONCRETS à repérer dans le document. Pour une comparaison, un axe par élément confronté (ex. pour « compare les résultats 2023 et 2024 » : "résultats 2023", "résultats 2024") ; pour une synthèse, un axe par partie ou par thème transversal à rassembler.
+- "informations_attendues" : au plus {NB_INFOS_ATTENDUES_MAX} types d'information recherchés (dates, montants, acteurs, décisions...). Liste vide si rien de plus précis que les axes.
+- N'invente aucun fait sur le contenu réel du document : tu ne l'as pas vu, tu structures seulement la demande.
+- Reste générique : n'utilise ni règle métier ni particularité d'un domaine ou d'un jeu de données précis."""
+
+
+def _systeme_plan(portee: str = PORTEE_INTER) -> str:
+    return _SYSTEME_PLAN_INTRA if portee == PORTEE_INTRA else _SYSTEME_PLAN
 
 
 #: Repli déterministe, générique par opération — jamais `axes=[question_brute]`
@@ -373,10 +454,37 @@ _OBJECTIF_REPLI: dict[str, str] = {
     "synthesize": "Synthétiser les documents fournis selon les axes ci-dessous.",
 }
 
+#: Repli intra-document (P1.9) : mêmes principes, formulés pour les parties
+#: d'un même document.
+_AXES_REPLI_INTRA: dict[str, tuple[str, ...]] = {
+    "compare": (
+        "éléments confrontés dans le document",
+        "faits et chiffres de chaque élément",
+        "positions exprimées pour chaque élément",
+        "évolutions ou différences potentielles",
+    ),
+    "synthesize": (
+        "thèmes récurrents d'une partie à l'autre",
+        "faits importants de chaque partie",
+        "éléments complémentaires entre parties",
+        "divergences éventuelles entre parties",
+    ),
+}
 
-def _plan_repli(operation: str) -> TaskSpec:
-    axes = _AXES_REPLI.get(operation, _AXES_REPLI["compare"])
-    objectif = _OBJECTIF_REPLI.get(operation, _OBJECTIF_REPLI["compare"])
+_OBJECTIF_REPLI_INTRA: dict[str, str] = {
+    "compare": "Comparer les éléments demandés au sein du document selon les axes ci-dessous.",
+    "synthesize": "Synthétiser les parties du document selon les axes ci-dessous.",
+}
+
+
+def _plan_repli(operation: str, portee: str = PORTEE_INTER) -> TaskSpec:
+    table_axes, table_objectifs = (
+        (_AXES_REPLI_INTRA, _OBJECTIF_REPLI_INTRA)
+        if portee == PORTEE_INTRA
+        else (_AXES_REPLI, _OBJECTIF_REPLI)
+    )
+    axes = table_axes.get(operation, table_axes["compare"])
+    objectif = table_objectifs.get(operation, table_objectifs["compare"])
     return TaskSpec(operation=operation, objectif=objectif, axes=axes, informations_attendues=())
 
 
@@ -417,6 +525,7 @@ def planifier(
     cibles: Sequence[DocumentCible],
     *,
     llm: Any,
+    portee: str = PORTEE_INTER,
 ) -> TaskSpec:
     """
     PLAN : UN appel LLM borné maximum, sans retry. Ne voit QUE la demande de
@@ -426,13 +535,14 @@ def planifier(
 
     Tout échec (LLM absent, appel raté, JSON invalide, axes vides après
     nettoyage) -> repli déterministe générique par opération. Jamais
-    `axes=[question_brute]`.
+    `axes=[question_brute]`. Portée ``intra`` (P1.9) : les axes désignent les
+    parties / éléments du document unique à confronter ou rassembler.
     """
-    repli = _plan_repli(operation)
+    repli = _plan_repli(operation, portee)
     if llm is None:
         return repli
 
-    systeme = _systeme_plan()
+    systeme = _systeme_plan(portee)
     utilisateur = (
         f"OPÉRATION\n{operation}\n\n"
         f"DEMANDE DE L'UTILISATEUR\n{question}\n\n"
@@ -889,6 +999,7 @@ def executer_maps(
     profil_domaine: Any | None = None,
     operation: Literal["compare", "synthesize"] = "compare",
     corpus_id: str = "default",
+    portee: str = PORTEE_INTER,
 ) -> list[MapDocument]:
     """
     PLAN (un appel borné, transparent pour l'appelant) puis MAP structuré par
@@ -899,7 +1010,7 @@ def executer_maps(
     `corpus_id` : les `cibles` doivent avoir été résolues dans ce même
     corpus (voir `resoudre_cibles`).
     """
-    task_spec = planifier(operation, question, cibles, llm=llm)
+    task_spec = planifier(operation, question, cibles, llm=llm, portee=portee)
     return [
         map_document(
             cible, task_spec, llm=llm, profil_domaine=profil_domaine, corpus_id=corpus_id
@@ -980,6 +1091,7 @@ __all__ = [
     "MapResult",
     "MapDocument",
     "resoudre_cibles",
+    "resolveur_catalogue",
     "planifier",
     "map_document",
     "executer_maps",

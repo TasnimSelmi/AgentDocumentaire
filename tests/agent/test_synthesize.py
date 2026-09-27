@@ -204,3 +204,41 @@ def test_synthese_documents_volumineux_couverts_en_entier(monkeypatch) -> None:
     assert r.donnees["par_document"]["note_a.pdf"]["nombre_lots"] > 1
     assert {s.page for s in r.sources} - {1}
     assert {s.doc_id for s in r.sources} <= {"A", "B"}
+
+
+# --------------------------------------------------------------------------
+# P1.9 — opération transmise au PLAN, portée intra-document
+# --------------------------------------------------------------------------
+
+
+def test_plan_recoit_loperation_synthesize(monkeypatch) -> None:
+    # Avant P1.9, `executer_maps` était appelé sans `operation` : le PLAN
+    # (et son repli) utilisait les axes de COMPARE.
+    _corpus_2(monkeypatch)
+    llm = LLMScripte()
+    synthetiser_documents("Synthèse de note_a.pdf et note_b.pdf.", ["note_a.pdf", "note_b.pdf"], llm=llm)
+    plans = [u for s, u in llm.appels if "prépares le PLAN" in s]
+    assert plans and "OPÉRATION\nsynthesize" in plans[0]
+
+
+def test_synthese_intra_un_seul_document(monkeypatch) -> None:
+    _corpus_2(monkeypatch)
+    llm = LLMScripte()
+    r = synthetiser_documents(
+        "Synthétise les chapitres de note_a.pdf.", ["note_a.pdf"], llm=llm, portee="intra"
+    )
+    assert r.succes
+    syn = ResultatSynthese(**r.donnees["synthese"])
+    assert syn.portee == "intra"
+    assert syn.documents == ["note_a.pdf"]
+    assert {s.doc_id for s in r.sources} == {"A"}
+    assert "note_a.pdf" in r.message
+    reduce = [s for s, _ in llm.appels if "SYNTHÈSE TRANSVERSALE" in s]
+    assert reduce and "parties d'UN SEUL document" in reduce[0]
+
+
+def test_synthese_inter_un_seul_document_reste_refusee(monkeypatch) -> None:
+    _corpus_2(monkeypatch)
+    r = synthetiser_documents("Synthèse de note_a.pdf.", ["note_a.pdf"], llm=LLMScripte())
+    assert not r.succes
+    assert r.donnees.get("motif") == "references_insuffisantes"

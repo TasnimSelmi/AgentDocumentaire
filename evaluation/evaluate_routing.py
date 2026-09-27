@@ -185,12 +185,17 @@ def router_cas(
 
     Puis (P1.5) applique le routing multi-document EXACTEMENT comme
     `noeud_detecter_intention` :
-      1. précédence multi-document sur les zones grises — >= 2 références de
-         fichiers explicites + verbe compare/synthesize => on route direct,
-         sans passer par un désambiguïsateur ;
+      1. précédence multi-document sur les zones grises
+         (`nodes._multidoc_explicite`) — >= 2 documents désignés + verbe
+         compare/synthesize => on route direct, sans désambiguïsateur ;
       2. `nodes._appliquer_signal_multidoc` peut faire basculer une intention
-         SEARCH/SUMMARIZE vers COMPARE/SYNTHESIZE.
+         SEARCH/SUMMARIZE vers COMPARE/SYNTHESIZE (portée inter ou, depuis
+         P1.9, intra-document).
     Aucune autre intention n'est touchée.
+
+    Limite assumée : le banc est purement lexical, sans index. Le résolveur
+    catalogue (`resolveur_catalogue`, P1.9) n'y est PAS injecté ; seule la
+    désignation par nom de fichier ou déixis est mesurée ici.
 
     Renvoie ``(routed_intent_majuscule, raw_detected, deferred_to_llm | None)``.
     """
@@ -200,12 +205,9 @@ def router_cas(
     brut = nodes._detecter_intention(query)
     signal = detecter_multidoc(query)
 
-    # 1. Précédence multi-document explicite sur les zones grises (§2.7).
-    multidoc_explicite = (
-        signal.is_multidoc
-        and len(signal.references_detectees) >= nodes.MINIMUM_REFERENCES_MULTIDOC
-        and signal.operation_hint in {"compare", "synthesize"}
-    )
+    # 1. Précédence multi-document explicite sur les zones grises (§2.7) —
+    #    même fonction que `noeud_detecter_intention` (P1.9).
+    multidoc_explicite = nodes._multidoc_explicite(signal)
 
     if multidoc_explicite:
         return signal.operation_hint.upper(), brut, None
@@ -426,8 +428,10 @@ def _afficher(rapport: RapportRoutage) -> None:
 #
 # Mesure SÉPARÉE, jamais fusionnée avec l'accuracy de routing. Ne modifie pas
 # l'`expected_intent` produit par le routeur. Ne porte que sur les cas munis
-# d'un champ `expected_multidoc` (RT-017/018/023/030 + RT-052..061).
-# P1.4 mesure le signal préparatoire ; P1.5 branchera réellement le routing.
+# d'un champ `expected_multidoc` (RT-017/018/023/030 + RT-052..061, puis
+# RT-066..071 pour P1.9). P1.4 mesure le signal préparatoire ; P1.5 branche
+# réellement le routing. P1.9 : un cas muni de `expected_portee` n'est
+# « exact » que si la portée (inter / intra / aucune) est aussi correcte.
 
 
 def evaluer_multidoc(cas: list[dict[str, Any]]) -> dict[str, Any]:
@@ -444,9 +448,11 @@ def evaluer_multidoc(cas: list[dict[str, Any]]) -> dict[str, Any]:
 
         d_ok = signal.is_multidoc == attendu_multi
         h_ok = signal.operation_hint == attendu_op
+        attendu_portee = c.get("expected_portee")
+        p_ok = attendu_portee is None or signal.portee == attendu_portee
         detection_ok += d_ok
         hint_ok += h_ok
-        exact_ok += d_ok and h_ok
+        exact_ok += d_ok and h_ok and p_ok
 
         resultats.append(
             {
@@ -456,11 +462,13 @@ def evaluer_multidoc(cas: list[dict[str, Any]]) -> dict[str, Any]:
                 "detected_multidoc": signal.is_multidoc,
                 "expected_operation": attendu_op,
                 "detected_operation": signal.operation_hint,
+                "expected_portee": attendu_portee,
+                "detected_portee": signal.portee,
                 "nombre_documents": signal.nombre_documents,
                 "references_detectees": list(signal.references_detectees),
                 "marqueur_pluriel": signal.marqueur_pluriel,
                 "confiance": signal.confiance,
-                "correct": d_ok and h_ok,
+                "correct": d_ok and h_ok and p_ok,
                 "raison": signal.raison,
             }
         )
@@ -485,7 +493,7 @@ def _afficher_multidoc(bloc: dict[str, Any]) -> None:
     print("=" * largeur)
     print("MESURE P1.4 — détecteur multi-document (mesure séparée, hors routing)")
     print("=" * largeur)
-    print(f"Sous-ensemble    : {bloc['total']} cas (RT-017/018/023/030 + RT-052..061)")
+    print(f"Sous-ensemble    : {bloc['total']} cas (RT-017/018/023/030 + RT-052..061 + RT-066..071)")
     print(
         f"Détection is_multidoc : {bloc['detection_accuracy']:.1%} "
         f"({bloc['detection_correcte']}/{bloc['total']})"

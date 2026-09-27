@@ -42,3 +42,18 @@ def _proteger_le_registre_corpus_reel(monkeypatch):
     monkeypatch.setattr(config_module, "get_registre_corpus", _lire)
     monkeypatch.setattr(config_module, "ecrire_registre_corpus", _ecrire)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _resolveur_catalogue_neutre(monkeypatch):
+    """
+    P1.9 — `noeud_detecter_intention` injecte le résolveur du catalogue réel
+    (`resolveur_catalogue`) dans le détecteur multi-document. Aucune suite ne
+    doit dépendre de l'index Qdrant local : par défaut, le résolveur ne
+    désigne aucun document. Un test qui exerce la résolution catalogue le
+    câble explicitement (monkeypatch par-dessus cette garde).
+    """
+    import src.agent.nodes as nodes_module
+
+    monkeypatch.setattr(nodes_module, "resolveur_catalogue", lambda corpus_id="default": lambda _q: ())
+    yield

@@ -293,8 +293,8 @@ supposée, inventée ou appelée.
 | `summarize` | `retrieval.charger_document` (lecture pure, **pas** de recherche) | 1..N documents entiers → résumé map-reduce borné | résume `ContexteOutil.sources` déjà récupérées |
 | `classify` | idem | document entier → **vote majoritaire absolu** par lots, sinon abstention | classe le contexte existant |
 | `extract` | idem | document entier → **déduplication** des valeurs par lots (jamais un vote), toutes les valeurs distinctes sourcées conservées | extrait des passages retrouvés d'un document (`document=<id>`) — atteint quand la recherche retient plusieurs documents (P1.8, voir §7.3) |
-| `compare` | `multidoc_pipeline` (`catalogue.par_identifiant` + `charger_document`) | 2..4 documents nommés → MAP par document → REDUCE inter-document | — (jamais de mode contextuel) |
-| `synthesize` | idem | 2..4 documents nommés → MAP par document → REDUCE transversal | — |
+| `compare` | `multidoc_pipeline` (`catalogue.par_identifiant` + `charger_document`) | 2..4 documents désignés → MAP par document → REDUCE inter-document ; ou (P1.9, `portee="intra"`) éléments d'UN document → REDUCE intra-document | — (jamais de mode contextuel) |
+| `synthesize` | idem | 2..4 documents désignés → MAP par document → REDUCE transversal ; ou (P1.9) parties d'UN document | — |
 
 Garanties communes SUMMARIZE/CLASSIFY/EXTRACT/COMPARE/SYNTHESIZE : aucun appel
 Qdrant hors `charger_document` / `catalogue`, aucun embedding/reranking, aucune
@@ -367,8 +367,16 @@ pluriels portant sur un nom de document, marqueurs comparatifs / de synthèse,
 avec un garde-fou déixis singulière (« ce document »). Appliqué **après**
 résolution des zones grises : il ne supplante que `search` / `summarize` ; une
 demande explicite CLASSIFY ou EXTRACT n'est jamais détournée. Précédence
-inverse (P1.5) : ≥ 2 références de fichiers + verbe compare/synthesize
+inverse (P1.5) : ≥ 2 documents désignés + verbe compare/synthesize
 explicite → `compare`/`synthesize` **sans** appeler de désambiguïsateur LLM.
+
+Depuis P1.9, `noeud_detecter_intention` injecte `resolveur_catalogue` (lecture
+seule de la résolution documentaire du catalogue, requête entière puis
+fragment par fragment) : les documents peuvent être désignés sans nom de
+fichier (`SignalMultiDoc.documents_cibles`). Le signal porte aussi une
+`portee` : `inter` (plusieurs documents) ou `intra` (un seul document désigné
++ marqueur comparatif strict, ou marqueur de synthèse + parties plurielles
+« chapitres / sections / parties »).
 
 `_parser_champs_extraction` (liste des champs demandés par EXTRACT) est un
 appel LLM borné distinct du routage : il ne choisit ni outil, ni document, ni
@@ -421,11 +429,18 @@ nommé dans l'avertissement (cas CQuAE CL-03).
 *Non couvert* : les désignations temporelles (« le rapport ajouté
 récemment ») — la résolution n'exploite pas la date d'ingestion.
 
-### 7.4 Branches COMPARE / SYNTHESIZE (`src/agent/multidoc_pipeline.py`, P1.5)
+### 7.4 Branches COMPARE / SYNTHESIZE (`src/agent/multidoc_pipeline.py`, P1.5 / P1.9)
 
-Activées uniquement quand le signal multi-document est **explicite**
-(`is_multidoc` + `operation_hint ∈ {compare, synthesize}`). `references` = noms
-de fichiers explicitement cités dans la requête.
+Activées uniquement quand le signal est **explicite** (`operation_hint ∈
+{compare, synthesize}` et portée `inter` ou `intra`). `references` =
+`documents_cibles` : noms de fichiers cités **ou** documents résolus par le
+catalogue (P1.9).
+
+Portée `intra` (P1.9) : exactement UN document ; PLAN et REDUCE en variante
+intra-document (axes = éléments ou parties à confronter / rassembler), même
+MAP, mêmes validations de citations. Sans document résolu (« ce rapport »),
+le ciblage P1.8 désigne le document ; plusieurs candidats → refus
+`intra_document_ambigu`, jamais un choix implicite.
 
 ```
 resoudre_cibles(references)              2..4 documents distincts et fiables,
@@ -754,7 +769,7 @@ génération — il ne modifie ni le retrieval ni le routage.
 | Quelle capacité pour cette requête ? | `agent/nodes.py` (déterministe) |
 | La requête vise-t-elle plusieurs documents ? | `agent/multidoc.py` (pur, sans LLM) |
 | Boucler / reformuler / refuser ? | `agent/nodes.py` + `agent/graph.py` |
-| Comparer / synthétiser 2..4 documents nommés ? | `agent/multidoc_pipeline.py` + `tools/compare.py` / `tools/synthesize.py` |
+| Comparer / synthétiser 2..4 documents, ou les parties d'un document ? | `agent/multidoc_pipeline.py` + `tools/compare.py` / `tools/synthesize.py` |
 | Exposer une capacité comme outil ? | `tools/*.py` |
 | Contrat de sortie unique pour un consommateur externe ? | `agent/response.py` (`AgentResponse`, déterministe) |
 | Exposer les façades en HTTP/JSON ? | `api/**` (transport, validation, mapping HTTP) |

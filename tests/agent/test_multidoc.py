@@ -14,6 +14,9 @@ from src.agent.multidoc import (
     HINT_AUCUN,
     HINT_COMPARE,
     HINT_SYNTHESIZE,
+    PORTEE_AUCUNE,
+    PORTEE_INTER,
+    PORTEE_INTRA,
     SignalMultiDoc,
     detecter_multidoc,
 )
@@ -97,33 +100,93 @@ def test_bilingue_fr_en() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_un_doc_plus_compare_les_deux_methodes_reste_mono() -> None:
+def test_un_doc_plus_compare_les_deux_methodes_est_compare_intra() -> None:
+    # P1.9 : un seul document (jamais multi-doc) mais comparaison intra.
     s = detecter_multidoc("Compare les deux méthodes décrites dans rapport_alpha.pdf.")
     assert s.is_multidoc is False
-    assert s.operation_hint == HINT_AUCUN
+    assert s.operation_hint == HINT_COMPARE
+    assert s.portee == PORTEE_INTRA
     assert s.nombre_documents == 1
+    assert s.documents_cibles == ("rapport_alpha.pdf",)
 
 
-def test_points_communs_entre_deux_approches_dans_ce_document_reste_mono() -> None:
+def test_points_communs_entre_deux_approches_dans_ce_document_est_compare_intra() -> None:
     s = detecter_multidoc(
         "Quels sont les points communs entre les deux approches présentées "
         "dans ce document ?"
     )
     assert s.is_multidoc is False
-    assert s.operation_hint == HINT_AUCUN
+    assert s.operation_hint == HINT_COMPARE
+    assert s.portee == PORTEE_INTRA
+    assert s.documents_cibles == ()
 
 
 def test_synthetiser_un_seul_doc_nest_pas_synthesize() -> None:
     s = detecter_multidoc("Peux-tu synthétiser rapport_alpha.pdf ?")
     assert s.is_multidoc is False
     assert s.operation_hint == HINT_AUCUN
+    assert s.portee == PORTEE_AUCUNE
 
 
 def test_deixis_singuliere_neutralise_un_marqueur_pluriel_faible() -> None:
     # « les deux sections » n'est pas un nom de document -> aucun marqueur ;
-    # « ce document » impose le mono.
+    # « ce document » impose le mono — et, depuis P1.9, la portée intra.
     s = detecter_multidoc("Compare les deux sections de ce document.")
     assert s.is_multidoc is False
+    assert s.portee == PORTEE_INTRA
+
+
+# --------------------------------------------------------------------------
+# P1.9 — portée intra-document
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Synthétise les différents chapitres de ce rapport.",
+        "Fais une synthèse transversale des parties de rapport_alpha.pdf.",
+        "Synthesize the findings across the chapters of this report.",
+    ],
+)
+def test_synthese_des_parties_dun_document_est_synthesize_intra(query: str) -> None:
+    s = detecter_multidoc(query)
+    assert s.is_multidoc is False
+    assert s.operation_hint == HINT_SYNTHESIZE
+    assert s.portee == PORTEE_INTRA
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # adjectif « différents » : pas une comparaison
+        "Quels sont les différents dispositifs décrits dans ce rapport ?",
+        # article défini, aucun document désigné : question factuelle
+        "Quelle est la différence entre le contrat CDD et le CDI ?",
+        # « en quoi » : marqueur comparatif faible, exclu en intra
+        "En quoi consiste la méthode décrite dans ce document ?",
+        # synthèse d'un document sans parties : reste un résumé
+        "Synthétise ce rapport.",
+        # comparaison sans aucun document
+        "Compare.",
+    ],
+)
+def test_portee_intra_anti_faux_positifs(query: str) -> None:
+    s = detecter_multidoc(query)
+    assert s.operation_hint == HINT_AUCUN
+    assert s.portee == PORTEE_AUCUNE
+
+
+def test_marqueur_pluriel_de_document_empeche_la_portee_intra() -> None:
+    # « ces deux rapports » + « le document » : ni inter fiable, ni intra.
+    s = detecter_multidoc("Compare ces deux rapports et le document annexe.")
+    assert s.portee != PORTEE_INTRA
+
+
+def test_portee_inter_avec_references_explicites() -> None:
+    s = detecter_multidoc("Compare rapport_alpha.pdf et rapport_beta.pdf.")
+    assert s.portee == PORTEE_INTER
+    assert s.documents_cibles == ("rapport_alpha.pdf", "rapport_beta.pdf")
 
 
 # --------------------------------------------------------------------------
@@ -217,6 +280,60 @@ def test_resolveur_renforce_le_signal_quand_aucune_reference_explicite() -> None
     assert s.is_multidoc is True
     assert s.nombre_documents == 2
     assert s.confiance == "moyenne"
+
+
+def test_resolveur_seulement_sollicite_pour_une_operation() -> None:
+    # P1.9 : une requête factuelle ne consulte jamais le catalogue.
+    appels: list[str] = []
+
+    def _resolveur(q: str):
+        appels.append(q)
+        return ["doc-1", "doc-2"]
+
+    s = detecter_multidoc("Quel est le taux d'adoption de l'IA ?", resolveur=_resolveur)
+    assert appels == []
+    assert s.is_multidoc is False
+
+
+def test_resolveur_designe_deux_documents_sans_nom_de_fichier() -> None:
+    s = detecter_multidoc(
+        "Synthétise le baromètre France Num et l'étude Bpifrance.",
+        resolveur=lambda _q: ["barometre_2024.pdf", "etude_bpi.pdf"],
+    )
+    assert s.is_multidoc is True
+    assert s.operation_hint == HINT_SYNTHESIZE
+    assert s.portee == PORTEE_INTER
+    assert s.documents_cibles == ("barometre_2024.pdf", "etude_bpi.pdf")
+
+
+def test_resolveur_un_seul_document_donne_une_portee_intra() -> None:
+    s = detecter_multidoc(
+        "Compare les résultats 2024 et 2025 dans le bulletin de la banque centrale.",
+        resolveur=lambda _q: ["bulletin.pdf"],
+    )
+    assert s.is_multidoc is False
+    assert s.operation_hint == HINT_COMPARE
+    assert s.portee == PORTEE_INTRA
+    assert s.documents_cibles == ("bulletin.pdf",)
+
+
+def test_reference_explicite_et_resolveur_dedupliques_sans_casse() -> None:
+    s = detecter_multidoc(
+        "Compare les deux méthodes décrites dans Rapport_Alpha.pdf.",
+        resolveur=lambda _q: ["rapport_alpha.pdf"],
+    )
+    assert s.documents_cibles == ("rapport_alpha.pdf",)
+    assert s.portee == PORTEE_INTRA
+
+
+def test_reference_explicite_plus_document_resolu_donne_inter() -> None:
+    s = detecter_multidoc(
+        "Compare rapport_alpha.pdf avec le bulletin de la banque centrale.",
+        resolveur=lambda _q: ["rapport_alpha.pdf", "bulletin.pdf"],
+    )
+    assert s.is_multidoc is True
+    assert s.portee == PORTEE_INTER
+    assert s.documents_cibles == ("rapport_alpha.pdf", "bulletin.pdf")
 
 
 def test_resolveur_defaillant_ne_casse_pas_la_detection() -> None:

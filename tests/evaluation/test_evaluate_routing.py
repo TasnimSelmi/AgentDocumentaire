@@ -283,13 +283,17 @@ def test_runner_fonctionne_sans_llm_joignable(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_baseline_search_intact(rapport: er.RapportRoutage) -> None:
-    """SEARCH doit rester à 100 % (24/24) : c'est la garantie anti-faux-positif
-    (les mots « points », « compare … dans ce document », « classification »,
+    """SEARCH doit rester à 100 % : c'est la garantie anti-faux-positif (les
+    mots « points », « différents », « en quoi », « classification »,
     « type/nature », « récupère » ne doivent jamais détourner une question
-    factuelle). Toute régression ici est un vrai défaut, pas un compromis."""
+    factuelle). Toute régression ici est un vrai défaut, pas un compromis.
+
+    P1.9 : 24 -> 25 cas. RT-017/018 (comparaison AU SEIN d'un document) sont
+    requalifiés COMPARE portée intra (demande produit) ; RT-069/070/071
+    ajoutés comme nouveaux anti-faux-positifs de la portée intra."""
     assert rapport.par_intention["SEARCH"]["accuracy"] == 1.0
-    assert rapport.par_intention["SEARCH"]["total"] == 24
-    assert rapport.par_intention["SEARCH"]["corrects"] == 24
+    assert rapport.par_intention["SEARCH"]["total"] == 25
+    assert rapport.par_intention["SEARCH"]["corrects"] == 25
 
 
 def test_deterministe_accuracy_plancher(rapport: er.RapportRoutage) -> None:
@@ -311,14 +315,25 @@ def test_p1_5_compare_synthesize_routes_en_deterministe(rapport: er.RapportRouta
     assert rapport.par_intention["SYNTHESIZE"]["accuracy"] == 1.0
 
 
-def test_p1_5_naffecte_pas_rt017_018_023_030(rapport: er.RapportRoutage) -> None:
-    """Anti-faux-positifs multi-doc : un seul document, ou multi-doc sans
-    opération, ne bascule jamais vers COMPARE/SYNTHESIZE."""
+def test_p1_5_naffecte_pas_rt023_030(rapport: er.RapportRoutage) -> None:
+    """Anti-faux-positifs multi-doc : multi-doc sans opération, ou synthèse
+    d'un seul document sans parties, ne bascule jamais vers
+    COMPARE/SYNTHESIZE."""
     par_id = {r["id"]: r for r in rapport.resultats}
-    assert par_id["RT-017"]["routed_intent"] == "SEARCH"
-    assert par_id["RT-018"]["routed_intent"] == "SEARCH"
     assert par_id["RT-023"]["routed_intent"] == "SEARCH"  # is_multidoc mais hint none
     assert par_id["RT-030"]["routed_intent"] == "SUMMARIZE"
+
+
+def test_p1_9_portee_intra_document(rapport: er.RapportRoutage) -> None:
+    """P1.9 : comparaison / synthèse au sein d'UN document routée vers
+    COMPARE / SYNTHESIZE ; les questions factuelles voisines restent SEARCH."""
+    par_id = {r["id"]: r for r in rapport.resultats}
+    for cid in ("RT-017", "RT-018", "RT-067"):
+        assert par_id[cid]["routed_intent"] == "COMPARE", cid
+    for cid in ("RT-066", "RT-068"):
+        assert par_id[cid]["routed_intent"] == "SYNTHESIZE", cid
+    for cid in ("RT-069", "RT-070", "RT-071"):
+        assert par_id[cid]["routed_intent"] == "SEARCH", cid
 
 
 def test_bande_b_summarize_et_extract_resolus_en_deterministe(
@@ -357,10 +372,11 @@ def test_clarify_encore_non_implementee(rapport: er.RapportRoutage) -> None:
 
 
 def test_multidoc_sous_ensemble_present(bloc_multidoc: dict, cas: list[dict]) -> None:
-    assert bloc_multidoc["total"] == 14
+    assert bloc_multidoc["total"] == 20  # 14 (P1.4) + 6 (P1.9, RT-066..071)
     ids = {r["id"] for r in bloc_multidoc["resultats"]}
     assert {"RT-017", "RT-018", "RT-023", "RT-030"} <= ids
     assert {f"RT-{n:03d}" for n in range(52, 62)} <= ids
+    assert {f"RT-{n:03d}" for n in range(66, 72)} <= ids
     # La mesure n'altère pas expected_intent : les cases restent celles du banc.
     par_id = {c["id"]: c for c in cas}
     assert par_id["RT-052"]["expected_intent"] == "COMPARE"
@@ -373,11 +389,14 @@ def test_multidoc_detection_parfaite(bloc_multidoc: dict) -> None:
     assert bloc_multidoc["exact_accuracy"] >= 0.95
 
 
-def test_multidoc_rt017_rt018_restent_mono(bloc_multidoc: dict) -> None:
+def test_multidoc_rt017_rt018_mono_portee_intra(bloc_multidoc: dict) -> None:
+    """P1.9 : un seul document (jamais `is_multidoc`), mais une comparaison
+    intra-document."""
     par_id = {r["id"]: r for r in bloc_multidoc["resultats"]}
     for cid in ("RT-017", "RT-018"):
         assert par_id[cid]["detected_multidoc"] is False, cid
-        assert par_id[cid]["detected_operation"] == "none", cid
+        assert par_id[cid]["detected_operation"] == "compare", cid
+        assert par_id[cid]["detected_portee"] == "intra", cid
 
 
 def test_multidoc_rt030_synthetiser_un_doc_reste_mono(bloc_multidoc: dict) -> None:

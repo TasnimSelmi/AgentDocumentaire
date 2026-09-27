@@ -25,7 +25,8 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from src.agent.graph_state import EtatGraphe
-from src.agent.multidoc import detecter_multidoc
+from src.agent.multidoc import PORTEE_INTER, PORTEE_INTRA, detecter_multidoc
+from src.agent.multidoc_pipeline import resolveur_catalogue
 from src.agent.session import SessionAgent
 from src.config import get_profil
 from src.llm.common import extraire_json_objet, invoquer_llm
@@ -587,24 +588,47 @@ def _stagnation(session: SessionAgent, score_maximal: float) -> bool:
 # ni une zone grise non résolue.
 _INTENTIONS_SUPPLANTABLES_PAR_MULTIDOC = frozenset({"search", "summarize"})
 
-# Nombre minimal de références de fichiers explicites pour qu'un verbe de
+# Nombre minimal de documents désignés (références de fichiers explicites ou,
+# depuis P1.9, documents résolus par le catalogue) pour qu'un verbe de
 # comparaison/synthèse prenne la précédence sur une zone grise (P1.5, §2.7).
 MINIMUM_REFERENCES_MULTIDOC = 2
 
 
+def _multidoc_explicite(signal: Any) -> bool:
+    """
+    Précédence multi-document sur les zones grises CLASSIFY/EXTRACT : au
+    moins `MINIMUM_REFERENCES_MULTIDOC` documents désignés de façon fiable et
+    un verbe de comparaison / synthèse. Jamais pour la portée intra-document.
+
+    Fonction pure, partagée avec `evaluation.evaluate_routing`.
+    """
+    cibles = getattr(signal, "documents_cibles", ()) or getattr(signal, "references_detectees", ())
+    return (
+        getattr(signal, "is_multidoc", False)
+        and getattr(signal, "portee", PORTEE_INTER) == PORTEE_INTER
+        and len(cibles) >= MINIMUM_REFERENCES_MULTIDOC
+        and getattr(signal, "operation_hint", "none") in {"compare", "synthesize"}
+    )
+
+
 def _appliquer_signal_multidoc(intention: str, signal: Any) -> str:
     """
-    Routing minimal P1.5 : une intention SEARCH/SUMMARIZE bascule vers
-    COMPARE/SYNTHESIZE **uniquement** si le signal multi-document est
-    explicite (`is_multidoc` et `operation_hint` ∈ {compare, synthesize}).
+    Routing P1.5 / P1.9 : une intention SEARCH/SUMMARIZE bascule vers
+    COMPARE/SYNTHESIZE **uniquement** si le signal le demande explicitement :
+    `operation_hint` ∈ {compare, synthesize} ET portée ``inter`` (plusieurs
+    documents, `is_multidoc`) ou ``intra`` (parties d'un même document).
     Sinon l'intention est renvoyée intacte.
 
     Fonction pure, partagée avec `evaluation.evaluate_routing` pour que le
     banc mesure exactement le même routage.
     """
+    portee = getattr(signal, "portee", PORTEE_INTER if getattr(signal, "is_multidoc", False) else None)
+    portee_valide = (
+        portee == PORTEE_INTER and getattr(signal, "is_multidoc", False)
+    ) or portee == PORTEE_INTRA
     if (
         intention in _INTENTIONS_SUPPLANTABLES_PAR_MULTIDOC
-        and getattr(signal, "is_multidoc", False)
+        and portee_valide
         and getattr(signal, "operation_hint", "none") in {"compare", "synthesize"}
     ):
         return signal.operation_hint
@@ -629,12 +653,19 @@ def noeud_detecter_intention(etat: EtatGraphe) -> dict:
 
     Le signal multi-document est appliqué APRÈS résolution des zones grises
     (`_appliquer_signal_multidoc`) : il ne supplante que SEARCH/SUMMARIZE.
+
+    P1.9 : le détecteur reçoit le résolveur du catalogue du corpus courant
+    (`resolveur_catalogue`, lecture seule) — les documents peuvent être
+    désignés sans nom de fichier exact — et reconnaît la portée
+    intra-document (comparaison / synthèse des parties d'un même document).
     """
     session = etat.session
     requete = session.etat.requete_courante
 
     intention = _detecter_intention(requete)
-    signal = detecter_multidoc(requete)
+    signal = detecter_multidoc(
+        requete, resolveur=resolveur_catalogue(session.contexte.corpus_id)
+    )
 
     # P1.5 — PRÉCÉDENCE MULTI-DOCUMENT SUR LES ZONES GRISES.
     # Des références de fichiers explicites (>= 2) combinées à un verbe de
@@ -645,11 +676,7 @@ def noeud_detecter_intention(etat: EtatGraphe) -> dict:
     # tomber `_detecter_intention` dans `_AMBIGU_CLASSIFY` (ou une énumération
     # dans `_AMBIGU_SEARCH_EXTRACT`), que `_appliquer_signal_multidoc` ne
     # supplanterait pas ensuite (il ne supplante que search / summarize).
-    multidoc_explicite = (
-        getattr(signal, "is_multidoc", False)
-        and len(getattr(signal, "references_detectees", ())) >= MINIMUM_REFERENCES_MULTIDOC
-        and getattr(signal, "operation_hint", "none") in {"compare", "synthesize"}
-    )
+    multidoc_explicite = _multidoc_explicite(signal)
 
     desambiguisation_llm = (
         not multidoc_explicite
@@ -672,6 +699,8 @@ def noeud_detecter_intention(etat: EtatGraphe) -> dict:
         desambiguisation_llm=desambiguisation_llm,
         multidoc=signal.is_multidoc,
         operation_hint=signal.operation_hint,
+        portee=signal.portee,
+        documents_cibles=list(signal.documents_cibles),
         multidoc_explicite=multidoc_explicite,
     )
 
@@ -1138,88 +1167,154 @@ def _signal_multidoc_courant(etat: EtatGraphe, requete: str) -> Any:
     signal = getattr(etat, "multidoc_signal", None)
     if signal is not None:
         return signal
-    return detecter_multidoc(requete)
+    return detecter_multidoc(
+        requete, resolveur=resolveur_catalogue(etat.session.contexte.corpus_id)
+    )
+
+
+def _references_multidoc(
+    session: SessionAgent, requete: str, signal: Any, outil: str
+) -> tuple[tuple[str, ...], str, ResultatOutil | None]:
+    """
+    Documents transmis à COMPARE / SYNTHESIZE et portée de l'opération (P1.9).
+
+    Portée ``inter`` : documents désignés par le signal (noms de fichiers
+    explicites + documents résolus par le catalogue) ; l'outil s'abstient
+    lui-même s'ils sont moins de 2 — jamais de search global.
+
+    Portée ``intra`` sans document résolu (« compare les deux approches de
+    ce rapport ») : le ciblage P1.8 (`_cibler_documents`) désigne LE
+    document. Plusieurs candidats -> refus déterministe qui les nomme, jamais
+    un choix implicite.
+
+    Returns:
+        ``(references, portee, refus)`` — ``refus`` non `None` : réponse finale.
+    """
+    portee = getattr(signal, "portee", PORTEE_INTER)
+    if portee != PORTEE_INTRA:
+        portee = PORTEE_INTER
+    references = tuple(
+        getattr(signal, "documents_cibles", ()) or getattr(signal, "references_detectees", ())
+    )
+    if portee != PORTEE_INTRA or references:
+        return references, portee, None
+
+    ciblage = _cibler_documents(session, requete)
+    if not ciblage.documents:
+        return (), portee, _refus_aucun_document(session, outil)
+    if len(ciblage.documents) > 1:
+        refus = ResultatOutil.echec(
+            outil,
+            "Plusieurs documents peuvent correspondre : "
+            + ", ".join(ciblage.libelles)
+            + ". Précise le document au sein duquel comparer ou synthétiser.",
+            motif="intra_document_ambigu",
+        )
+        session.contexte.ajouter_resultat(refus)
+        return (), portee, refus
+    return ciblage.identifiants, portee, None
+
+
+def _sortie_multidoc(
+    session: SessionAgent,
+    signal: Any,
+    resultat: ResultatOutil,
+    *,
+    outil: str,
+    cle: str,
+    references: tuple[str, ...],
+    portee: str,
+    succes: str,
+    echec: str,
+) -> dict:
+    """Trace et mise à jour d'état communes à COMPARE / SYNTHESIZE."""
+    documents = tuple(resultat.donnees.get(cle, {}).get("documents", ())) \
+        if resultat.succes else ()
+
+    session.etat.ajouter_trace(
+        outil,
+        succes if resultat.succes else echec,
+        succes=resultat.succes,
+        portee=portee,
+        references=list(getattr(signal, "references_detectees", ())),
+        documents_cibles=list(references),
+        documents_resolus=list(documents),
+        motif=resultat.donnees.get("motif"),
+    )
+
+    return {
+        "session": session,
+        "reponse": resultat,
+        "documents_resolus": documents,
+        f"resultat_{outil}": resultat.donnees.get(cle) if resultat.succes else None,
+    }
 
 
 def noeud_compare(etat: EtatGraphe) -> dict:
     """
-    Branche COMPARE (P1.5). Compare 2 à 4 documents explicitement nommés par
-    l'utilisateur : MAP borné par document (contenu de CE document
-    uniquement) -> REDUCE inter-document -> `ResultatOutil` avec provenance
-    par document. Aucun search global. Résolution non fiable -> abstention
-    déterministe (jamais de repli vers `search`).
+    Branche COMPARE (P1.5 / P1.9). Compare 2 à 4 documents désignés par
+    l'utilisateur (nom de fichier, ou document résolu par le catalogue), ou
+    — portée intra — plusieurs éléments d'UN même document : MAP borné par
+    document (contenu de CE document uniquement) -> REDUCE -> `ResultatOutil`
+    avec provenance par document. Aucun search global pour la portée inter.
+    Résolution non fiable -> abstention déterministe.
     """
     session = etat.session
     requete = session.etat.requete_courante
     signal = _signal_multidoc_courant(etat, requete)
 
-    resultat = comparer(
-        requete,
-        getattr(signal, "references_detectees", ()),
-        llm=session.llm,
-        profil_domaine=session.contexte.profil_domaine,
-        corpus_id=session.contexte.corpus_id,
+    references, portee, refus = _references_multidoc(session, requete, signal, "compare")
+    if refus is not None:
+        resultat = refus
+    else:
+        resultat = comparer(
+            requete,
+            references,
+            llm=session.llm,
+            profil_domaine=session.contexte.profil_domaine,
+            corpus_id=session.contexte.corpus_id,
+            portee=portee,
+        )
+        session.contexte.ajouter_resultat(resultat)
+
+    return _sortie_multidoc(
+        session, signal, resultat,
+        outil="compare", cle="comparaison", references=references, portee=portee,
+        succes="Comparaison produite.", echec="Comparaison impossible.",
     )
-    session.contexte.ajouter_resultat(resultat)
-
-    documents = tuple(resultat.donnees.get("comparaison", {}).get("documents", ())) \
-        if resultat.succes else ()
-
-    session.etat.ajouter_trace(
-        "compare",
-        "Comparaison produite." if resultat.succes else "Comparaison impossible.",
-        succes=resultat.succes,
-        references=list(getattr(signal, "references_detectees", ())),
-        documents_resolus=list(documents),
-        motif=resultat.donnees.get("motif"),
-    )
-
-    return {
-        "session": session,
-        "reponse": resultat,
-        "documents_resolus": documents,
-        "resultat_compare": resultat.donnees.get("comparaison") if resultat.succes else None,
-    }
 
 
 def noeud_synthesize(etat: EtatGraphe) -> dict:
     """
-    Branche SYNTHESIZE (P1.5). Synthèse transversale de 2 à 4 documents
-    explicitement nommés : même structure MAP -> REDUCE que `noeud_compare`.
-    Les divergences entre documents sont conservées explicitement. Aucun
-    search global ; résolution non fiable -> abstention déterministe.
+    Branche SYNTHESIZE (P1.5 / P1.9). Synthèse transversale de 2 à 4
+    documents désignés, ou — portée intra — des différentes parties d'UN
+    même document : même structure MAP -> REDUCE que `noeud_compare`. Les
+    divergences sont conservées explicitement. Résolution non fiable ->
+    abstention déterministe.
     """
     session = etat.session
     requete = session.etat.requete_courante
     signal = _signal_multidoc_courant(etat, requete)
 
-    resultat = synthetiser_documents(
-        requete,
-        getattr(signal, "references_detectees", ()),
-        llm=session.llm,
-        profil_domaine=session.contexte.profil_domaine,
-        corpus_id=session.contexte.corpus_id,
+    references, portee, refus = _references_multidoc(session, requete, signal, "synthesize")
+    if refus is not None:
+        resultat = refus
+    else:
+        resultat = synthetiser_documents(
+            requete,
+            references,
+            llm=session.llm,
+            profil_domaine=session.contexte.profil_domaine,
+            corpus_id=session.contexte.corpus_id,
+            portee=portee,
+        )
+        session.contexte.ajouter_resultat(resultat)
+
+    return _sortie_multidoc(
+        session, signal, resultat,
+        outil="synthesize", cle="synthese", references=references, portee=portee,
+        succes="Synthèse produite.", echec="Synthèse impossible.",
     )
-    session.contexte.ajouter_resultat(resultat)
-
-    documents = tuple(resultat.donnees.get("synthese", {}).get("documents", ())) \
-        if resultat.succes else ()
-
-    session.etat.ajouter_trace(
-        "synthesize",
-        "Synthèse produite." if resultat.succes else "Synthèse impossible.",
-        succes=resultat.succes,
-        references=list(getattr(signal, "references_detectees", ())),
-        documents_resolus=list(documents),
-        motif=resultat.donnees.get("motif"),
-    )
-
-    return {
-        "session": session,
-        "reponse": resultat,
-        "documents_resolus": documents,
-        "resultat_synthesize": resultat.donnees.get("synthese") if resultat.succes else None,
-    }
 
 
 def noeud_rechercher(etat: EtatGraphe) -> dict:

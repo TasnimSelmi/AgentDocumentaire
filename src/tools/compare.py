@@ -1,8 +1,9 @@
 """
 Capacité COMPARE (étape P1.5).
 
-Compare explicitement 2 à 4 documents ciblés par l'utilisateur.
-MAP par document (via `multidoc_pipeline`) -> REDUCE inter-document ->
+Compare explicitement 2 à 4 documents ciblés par l'utilisateur — ou, depuis
+P1.9 (`portee="intra"`), plusieurs éléments au sein d'UN même document
+(sections, périodes, options…). MAP par document (via `multidoc_pipeline`) -> REDUCE inter-document ->
 `ResultatOutil` avec provenance par document.
 
 Ne réalise AUCUN search global : le REDUCE ne voit que les sorties MAP
@@ -19,6 +20,7 @@ from typing import Any, Literal, Sequence
 from src.llm.common import bloc_profil_domaine, extraire_json_objet, invoquer_llm
 from src.tools.base import ResultatOutil, SourceOutil
 
+from src.agent.multidoc import PORTEE_INTER, PORTEE_INTRA
 from src.agent.multidoc_pipeline import (
     bloc_maps_pour_reduce,
     budget_caracteres_entree_llm,
@@ -58,6 +60,7 @@ class ResultatCompare:
     conclusion: str | None = None
     documents_sans_evidence: list[str] = field(default_factory=list)
     documents_en_echec: list[str] = field(default_factory=list)
+    portee: str = PORTEE_INTER
 
 
 _SYSTEME_REDUCE = """Tu construis une COMPARAISON entre plusieurs documents à partir d'analyses déjà réalisées, une par document.
@@ -82,9 +85,32 @@ Réponds UNIQUEMENT avec un objet JSON strict :
 }"""
 
 
-def _systeme_reduce(profil_domaine: Any | None) -> str:
+_SYSTEME_REDUCE_INTRA = """Tu construis une COMPARAISON entre plusieurs éléments d'UN SEUL document (sections, périodes, options, approches…) à partir d'une analyse déjà réalisée de ce document, organisée par axe.
+
+RÈGLES ABSOLUES
+- Utilise UNIQUEMENT l'analyse fournie ci-dessous. Tu n'as pas accès au document complet ni à aucune autre source.
+- N'invente aucun fait, chiffre, position ou conclusion.
+- Chaque point (commun, différence, position, contradiction, conclusion) DOIT porter au moins une citation [D_S_] reprise de l'analyse.
+- Compare les éléments demandés ENTRE EUX : attribue chaque affirmation à l'élément qu'elle concerne, sans en fusionner deux si un seul passage la soutient.
+- Si le document se contredit d'une partie à l'autre, conserve la divergence EXPLICITEMENT dans "contradictions" ou "differences" — ne la lisse pas.
+- Si le document ne dit rien de l'un des éléments demandés, ne fabrique rien pour lui et ne fabrique AUCUNE comparaison le concernant.
+- "positions_par_document" : une entrée par ÉLÉMENT comparé (clé = libellé de l'élément), avec ses citations.
+- La "conclusion" est facultative : ne la fournis que si l'analyse la soutient réellement, sinon mets null.
+
+Réponds UNIQUEMENT avec un objet JSON strict :
+{
+  "points_communs": ["... [D1S2][D1S7]", ...],
+  "differences": ["... [D1S3]", ...],
+  "positions_par_document": {"<élément comparé>": "... [D1S1]"},
+  "contradictions": ["... [D1S2] vs [D1S9]", ...],
+  "conclusion": "... [D1S1][D1S4]" | null
+}"""
+
+
+def _systeme_reduce(profil_domaine: Any | None, portee: str = PORTEE_INTER) -> str:
+    base = _SYSTEME_REDUCE_INTRA if portee == PORTEE_INTRA else _SYSTEME_REDUCE
     bloc = bloc_profil_domaine(profil_domaine)
-    return f"{_SYSTEME_REDUCE}\n\n{bloc}" if bloc else _SYSTEME_REDUCE
+    return f"{base}\n\n{bloc}" if bloc else base
 
 
 def _liste_str(valeur: Any) -> list[str]:
@@ -116,6 +142,7 @@ def comparer(
     profil_domaine: Any | None = None,
     corpus_id: str = "default",
     strategy: Literal["map_reduce", "contextual", "hybrid"] = "map_reduce",
+    portee: str = PORTEE_INTER,
 ) -> ResultatOutil:
     """
     Point d'entrée COMPARE. `references` = noms de fichiers explicites du
@@ -160,11 +187,12 @@ def comparer(
             profil_domaine=profil_domaine,
             repli=lambda: comparer(
                 question, references, llm=llm, profil_domaine=profil_domaine,
-                corpus_id=corpus_id, strategy="map_reduce",
+                corpus_id=corpus_id, strategy="map_reduce", portee=portee,
             ),
         )
 
-    resolution = resoudre_cibles(references, corpus_id=corpus_id)
+    intra = portee == PORTEE_INTRA
+    resolution = resoudre_cibles(references, corpus_id=corpus_id, portee=portee)
     if resolution.refus is not None:
         return ResultatOutil.echec(_OUTIL, resolution.refus, motif=resolution.motif)
 
@@ -176,7 +204,9 @@ def comparer(
         question,
         llm=llm,
         profil_domaine=profil_domaine,
+        operation="compare",
         corpus_id=corpus_id,
+        portee=portee,
     )
     utilisables, sans_evidence, echecs = diagnostic_maps(maps)
 
@@ -204,10 +234,11 @@ def comparer(
     statut = STATUT_PARTIEL if (sans_evidence or echecs) else STATUT_COMPLET
 
     autorisees = citations_autorisees(maps)
-    systeme = _systeme_reduce(profil_domaine)
+    systeme = _systeme_reduce(profil_domaine, portee)
     utilisateur = (
         f"QUESTION DE COMPARAISON\n{question}\n\n"
-        f"ANALYSES PAR DOCUMENT\n{bloc_maps_pour_reduce(maps)}\n\n"
+        + ("ANALYSE DU DOCUMENT (par axe)\n" if intra else "ANALYSES PAR DOCUMENT\n")
+        + f"{bloc_maps_pour_reduce(maps)}\n\n"
         "Produis maintenant l'objet JSON de comparaison."
     )
 
@@ -292,6 +323,7 @@ def comparer(
         conclusion=conclusion,
         documents_sans_evidence=sans_evidence,
         documents_en_echec=echecs,
+        portee=portee,
     )
 
     avertissements: list[str] = []
@@ -309,7 +341,9 @@ def comparer(
             f"{len(rejets)} affirmation(s) sans citation valide écartée(s)."
         )
 
-    if statut == STATUT_PARTIEL:
+    if intra:
+        message = f"Comparaison au sein du document « {maps[0].cible.libelle} »."
+    elif statut == STATUT_PARTIEL:
         message = (
             f"Comparaison partielle : {len(utilisables)}/{len(maps)} document(s) "
             "apportent des éléments exploitables ; voir les limitations."
