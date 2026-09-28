@@ -378,6 +378,16 @@ fichier (`SignalMultiDoc.documents_cibles`). Le signal porte aussi une
 + marqueur comparatif strict, ou marqueur de synthèse + parties plurielles
 « chapitres / sections / parties »).
 
+**Classifieur LLM de repli** (P1.10) : si, après tout ce qui précède, la
+requête est encore routée `search`, un appel LLM borné
+(`_repli_classification_llm`, ~0,3 s en local) peut la promouvoir vers
+`summarize`, `compare` ou `synthesize` — jamais vers `classify` / `extract`,
+jamais depuis une autre intention. `compare` / `synthesize` ne sont retenus
+que si des documents sont désignés (`multidoc.signal_operation_imposee` :
+≥ 2 → portée inter, 1 ou « ce rapport » → intra, sinon `search`). Tout échec
+retombe sur `search`. Le mode `production_routing` du banc applique la même
+fonction.
+
 `_parser_champs_extraction` (liste des champs demandés par EXTRACT) est un
 appel LLM borné distinct du routage : il ne choisit ni outil, ni document, ni
 catégorie.

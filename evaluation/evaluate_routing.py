@@ -192,6 +192,8 @@ def router_cas(
          SEARCH/SUMMARIZE vers COMPARE/SYNTHESIZE (portée inter ou, depuis
          P1.9, intra-document).
     Aucune autre intention n'est touchée.
+      3. (P1.10, ``production_routing`` uniquement) une requête encore routée
+         SEARCH passe par `nodes._repli_classification_llm`.
 
     Limite assumée : le banc est purement lexical, sans index. Le résolveur
     catalogue (`resolveur_catalogue`, P1.9) n'y est PAS injecté ; seule la
@@ -228,6 +230,14 @@ def router_cas(
 
     # 2. Bascule SEARCH/SUMMARIZE -> COMPARE/SYNTHESIZE, déterministe.
     intention = nodes._appliquer_signal_multidoc(intention, signal)
+
+    # 3. P1.10 — classifieur LLM de repli (production uniquement), même
+    #    fonction que `noeud_detecter_intention`. Sans résolveur catalogue :
+    #    seules les références de fichiers / déixis comptent comme documents
+    #    désignés pour COMPARE / SYNTHESIZE.
+    if mode == MODE_PRODUCTION and intention == "search":
+        intention, _, _ = nodes._repli_classification_llm(llm, query)
+        deferred = deferred or "repli_llm"
     return intention.upper(), brut, deferred
 
 

@@ -405,3 +405,61 @@ def detecter_multidoc(
         portee=portee,
         documents_cibles=tuple(cibles),
     )
+
+
+def signal_operation_imposee(
+    query: str,
+    operation: str,
+    *,
+    resolveur: Callable[[str], Iterable[str]] | None = None,
+) -> SignalMultiDoc | None:
+    """
+    Signal COMPARE / SYNTHESIZE lorsque l'opération a été reconnue par le
+    classifieur d'intention LLM de repli (voir `nodes._repli_classification_llm`)
+    et non par le vocabulaire de ce module.
+
+    Garde-fou DÉTERMINISTE : l'opération n'est retenue que si des documents
+    sont effectivement désignés — >= 2 documents (références explicites +
+    `resolveur`) => portée ``inter`` ; exactement 1, ou déixis démonstrative
+    (« ce rapport ») => portée ``intra``. Sinon `None` : la requête reste une
+    recherche (« quelle est la différence entre X et Y ? » sans document
+    n'est pas une comparaison exécutable).
+    """
+    if operation not in {HINT_COMPARE, HINT_SYNTHESIZE}:
+        return None
+    original = str(query)
+    normalisee = _normaliser(original)
+
+    references = _references_fichiers(original)
+    refs_resolveur: tuple[str, ...] = ()
+    if resolveur is not None and len(references) < 2:
+        try:
+            refs_resolveur = tuple(dict.fromkeys(str(r) for r in resolveur(original) if r))
+        except Exception:  # noqa: BLE001 — un résolveur défaillant ne casse rien
+            refs_resolveur = ()
+
+    cibles: list[str] = []
+    for ref in (*references, *refs_resolveur):
+        if ref.lower() not in {c.lower() for c in cibles}:
+            cibles.append(ref)
+
+    deixis = any(m.search(normalisee) for m in _MOTIFS_DEIXIS_DEMONSTRATIVE)
+    if len(cibles) >= 2:
+        portee, is_multidoc = PORTEE_INTER, True
+    elif len(cibles) == 1 or deixis:
+        portee, is_multidoc = PORTEE_INTRA, False
+    else:
+        return None
+
+    return SignalMultiDoc(
+        is_multidoc=is_multidoc,
+        operation_hint=operation,
+        nombre_documents=max(len(cibles), 1),
+        references_detectees=references,
+        marqueur_pluriel=None,
+        confiance="moyenne",
+        raison=f"opération {operation} reconnue par le classifieur LLM ; "
+        f"{len(cibles)} document(s) désigné(s), portée {portee}",
+        portee=portee,
+        documents_cibles=tuple(cibles),
+    )

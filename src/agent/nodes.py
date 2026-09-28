@@ -25,7 +25,12 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from src.agent.graph_state import EtatGraphe
-from src.agent.multidoc import PORTEE_INTER, PORTEE_INTRA, detecter_multidoc
+from src.agent.multidoc import (
+    PORTEE_INTER,
+    PORTEE_INTRA,
+    detecter_multidoc,
+    signal_operation_imposee,
+)
 from src.agent.multidoc_pipeline import resolveur_catalogue
 from src.agent.session import SessionAgent
 from src.config import get_profil
@@ -511,6 +516,106 @@ def _desambiguiser_intention_search_extract(llm: Any, requete: str) -> str:
     return "search"
 
 
+# ===========================================================================
+# P1.10 — Classifieur d'intention LLM de REPLI
+# ===========================================================================
+#
+# Le vocabulaire fermé de `_detecter_intention` couvre les formulations
+# attendues, mais pas les reformulations libres (« c quoi la diff entre… »,
+# « mets côte à côte… », « ça parle de quoi en gros ? ») : sur 32 requêtes
+# d'utilisateur naïf, 11 à 13 seulement étaient routées correctement, tout le
+# reste retombant sur SEARCH par défaut. Ce classifieur n'intervient QUE
+# lorsque le routage complet (règles, zones grises, signal multi-document) a
+# abouti à SEARCH ; il ne détourne jamais une intention déjà reconnue.
+#
+# Garde-fous déterministes (mesurés : sans eux, 9 à 11 faux positifs sur les
+# questions factuelles du banc) :
+#   - promotion LIMITÉE à SUMMARIZE / COMPARE / SYNTHESIZE — EXTRACT et
+#     CLASSIFY gardent leurs propres règles et désambiguïsateurs ;
+#   - COMPARE / SYNTHESIZE seulement si des documents sont effectivement
+#     désignés (`signal_operation_imposee`), sinon SEARCH ;
+#   - tout échec (LLM absent, JSON invalide, valeur hors ensemble) -> SEARCH.
+_INTENTIONS_PROMOUVABLES_PAR_LLM = frozenset({"summarize", "compare", "synthesize"})
+
+_SYSTEME_CLASSIFICATION_INTENTION = """Tu identifies l'intention d'une requête adressée à un agent documentaire qui interroge un corpus de documents.
+
+Par défaut, une requête est SEARCH. Ne choisis une autre intention que si la requête demande CLAIREMENT l'opération correspondante.
+
+- SEARCH (défaut) : toute question qui attend une réponse rédigée sur un point précis : un fait, un chiffre, une date, une définition, une liste d'éléments sur un sujet, ce qu'un document dit à propos d'un sujet donné, la manière dont une chose fonctionne. Aussi toute requête vague ou sans action claire.
+- SUMMARIZE : demande un résumé ou un aperçu GÉNÉRAL de tout un document ou de toute une partie, sans sujet précis (« résume », « de quoi parle ce document », « donne les grandes lignes »).
+- CLASSIFY : demande de ranger LE DOCUMENT LUI-MÊME dans une catégorie ou de déterminer son type.
+- EXTRACT : demande de relever PLUSIEURS champs distincts sous forme de liste structurée (ex. « donne le nom, la date et le montant »), ou de lister tous les chiffres / montants / valeurs d'un document.
+- COMPARE : demande explicitement de confronter plusieurs documents ou plusieurs parties d'un document : points communs, différences, contradictions, ce qui change de l'un à l'autre.
+- SYNTHESIZE : demande de rassembler, regrouper, fusionner ou donner une vue d'ensemble de ce que disent PLUSIEURS documents (ou plusieurs parties d'un document).
+
+Contre-exemples (tous SEARCH) :
+- « Quel est le délai indiqué dans le contrat ? » — un seul fait.
+- « Qu'est-ce que le rapport dit sur la sécurité ? » — un sujet précis, pas un résumé général.
+- « Quels risques sont mentionnés dans cette note ? » — une question, pas une extraction de champs.
+- « En quoi consiste la procédure décrite ? » — une explication.
+- « Le chiffre a-t-il augmenté entre les deux années ? » — une question précise, pas une demande de comparaison.
+- « Aide-moi avec ce fichier. » — requête vague.
+
+Portée (uniquement pour COMPARE et SYNTHESIZE, sinon null) : INTER = plusieurs documents distincts ; INTRA = plusieurs éléments ou parties d'UN SEUL document.
+
+La requête peut contenir des fautes de frappe, être familière ou en anglais.
+
+Réponds uniquement avec un objet JSON strict :
+{"intention": "SEARCH"|"SUMMARIZE"|"CLASSIFY"|"EXTRACT"|"COMPARE"|"SYNTHESIZE", "portee": "INTER"|"INTRA"|null}
+"""
+
+
+def _classifier_intention_llm(llm: Any, requete: str) -> str:
+    """
+    Classifieur LLM borné de repli : une seule évaluation, sortie brute
+    normalisée en minuscules (``"search"`` sur tout échec). `reasoning=False` :
+    tâche de classification courte (latence mesurée ~0,3 s en local).
+    La portée renvoyée par le LLM est ignorée : elle est recalculée
+    déterministiquement à partir des documents désignés.
+    """
+    if llm is None:
+        return "search"
+    try:
+        texte = invoquer_llm(
+            llm,
+            systeme=_SYSTEME_CLASSIFICATION_INTENTION,
+            utilisateur=requete,
+            reasoning=False,
+        )
+        objet = extraire_json_objet(texte)
+        return str(objet.get("intention", "")).strip().lower() or "search"
+    except Exception as exc:  # noqa: BLE001 — classifieur borné, repli conservateur
+        logger.warning("Classification d'intention de repli impossible : %s", exc)
+    return "search"
+
+
+def _repli_classification_llm(
+    llm: Any,
+    requete: str,
+    *,
+    resolveur: Any = None,
+) -> tuple[str, Any, str]:
+    """
+    Applique le classifieur de repli et ses garde-fous à une requête déjà
+    routée vers SEARCH. Fonction partagée avec `evaluation.evaluate_routing`
+    (mode ``production_routing``).
+
+    Returns:
+        ``(intention, signal, brut)`` — ``signal`` est le nouveau
+        `SignalMultiDoc` pour COMPARE / SYNTHESIZE, sinon `None` ; ``brut`` est
+        la sortie du LLM avant garde-fous (trace).
+    """
+    brut = _classifier_intention_llm(llm, requete)
+    if brut not in _INTENTIONS_PROMOUVABLES_PAR_LLM:
+        return "search", None, brut
+    if brut == "summarize":
+        return "summarize", None, brut
+    signal = signal_operation_imposee(requete, brut, resolveur=resolveur)
+    if signal is None:
+        return "search", None, brut
+    return brut, signal, brut
+
+
 _SYSTEME_PARSING_CHAMPS_EXTRACTION = """Tu identifies la liste des informations demandées dans une requête adressée à un système d'extraction documentaire.
 
 RÈGLES STRICTES
@@ -692,6 +797,16 @@ def noeud_detecter_intention(etat: EtatGraphe) -> dict:
 
     intention = _appliquer_signal_multidoc(intention, signal)
 
+    # P1.10 — repli LLM : seulement si tout le routage ci-dessus a abouti à
+    # SEARCH (aucune intention reconnue n'est jamais détournée).
+    classification_llm = None
+    if intention == "search":
+        intention, signal_llm, classification_llm = _repli_classification_llm(
+            session.llm, requete, resolveur=resolveur_catalogue(session.contexte.corpus_id)
+        )
+        if signal_llm is not None:
+            signal = signal_llm
+
     session.etat.ajouter_trace(
         "intention",
         f"Intention détectée : {intention}.",
@@ -702,6 +817,7 @@ def noeud_detecter_intention(etat: EtatGraphe) -> dict:
         portee=signal.portee,
         documents_cibles=list(signal.documents_cibles),
         multidoc_explicite=multidoc_explicite,
+        classification_llm=classification_llm,
     )
 
     return {"session": session, "intention": intention, "multidoc_signal": signal}
